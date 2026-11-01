@@ -6,40 +6,44 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  # A dry run of the release: builds and checks the signed APK and uploads it as an artifact, without a release.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
       - name: Test, lint and build
         run: ./gradlew --no-daemon test lintDebug assembleDebug
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: canvas-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: reports
           path: |
@@ -47,18 +51,91 @@ jobs:
             app/build/reports/
           if-no-files-found: ignore
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # gh release create
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+
+      - name: Check the signing secrets are set
         env:
-          GH_TOKEN: ${{ github.token }}
           CANVAS_KEYSTORE_B64: ${{ secrets.CANVAS_KEYSTORE_B64 }}
           CANVAS_KEYSTORE_PASSWORD: ${{ secrets.CANVAS_KEYSTORE_PASSWORD }}
           CANVAS_KEY_ALIAS: ${{ secrets.CANVAS_KEY_ALIAS }}
           CANVAS_KEY_PASSWORD: ${{ secrets.CANVAS_KEY_PASSWORD }}
         run: |
-          echo "$CANVAS_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
+          # Without them Gradle would quietly sign the release with the debug key. Only the names are printed.
+          missing=""
+          for name in CANVAS_KEYSTORE_B64 CANVAS_KEYSTORE_PASSWORD CANVAS_KEY_ALIAS CANVAS_KEY_PASSWORD; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Release signing secret(s) not set:$missing"
+            exit 1
+          fi
+
+      - name: Build the signed release APK
+        env:
+          CANVAS_KEYSTORE_B64: ${{ secrets.CANVAS_KEYSTORE_B64 }}
+          CANVAS_KEYSTORE_PASSWORD: ${{ secrets.CANVAS_KEYSTORE_PASSWORD }}
+          CANVAS_KEY_ALIAS: ${{ secrets.CANVAS_KEY_ALIAS }}
+          CANVAS_KEY_PASSWORD: ${{ secrets.CANVAS_KEY_PASSWORD }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="dry-run-${GITHUB_SHA::7}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          trap 'rm -f "$RUNNER_TEMP/release.p12"' EXIT
+          printf '%s' "$CANVAS_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
           export CANVAS_KEYSTORE="$RUNNER_TEMP/release.p12"
-          VERSION="${GITHUB_REF_NAME#v}"
           ./gradlew --no-daemon assembleRelease -PversionName="$VERSION" -PversionCode="$GITHUB_RUN_NUMBER"
           cp app/build/outputs/apk/release/app-release.apk "canvas-$VERSION.apk"
-          gh release create "$GITHUB_REF_NAME" "canvas-$VERSION.apk" --title "Canvas $VERSION" --generate-notes
+
+      - name: Check the APK is signed with the release key
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          apksigner="$(find "$sdk/build-tools" -mindepth 2 -maxdepth 2 -name apksigner -type f 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -z "$sdk" ] || [ ! -x "$apksigner" ]; then
+            echo "::error::apksigner not found under \$ANDROID_HOME/build-tools"
+            exit 1
+          fi
+          echo "Using $apksigner"
+          certs="$("$apksigner" verify --print-certs "canvas-$VERSION.apk")"
+          if ! grep -E "^Signer #[0-9]+ certificate (DN|SHA-256 digest):" <<< "$certs"; then
+            echo "::error::apksigner printed no signer for canvas-$VERSION.apk"
+            exit 1
+          fi
+          if grep -q "CN=Android Debug" <<< "$certs"; then
+            echo "::error::canvas-$VERSION.apk is signed with the debug key, not the release key"
+            exit 1
+          fi
+
+      - name: Upload the signed APK (dry run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: canvas-release-apk
+          path: canvas-${{ env.VERSION }}.apk
+          if-no-files-found: error
+
+      - name: Release
+        if: github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" "canvas-$VERSION.apk" --title "Canvas $VERSION" --generate-notes
