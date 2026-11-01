@@ -85,4 +85,26 @@ class SlidePlannerTest {
             assertTrue(id == "p1" || id == "p2")
         }
     }
+
+    @Test
+    fun noPhotoShowsOnTwoSlidesInARow() {
+        val library = listOf(
+            landscape("L1"),
+            landscape("L2", favorite = true),
+            landscape("L3"),
+            portrait("P1"),
+            PhotoRef("P2", portrait = true, favorite = true),
+        )
+        for (seed in 1..200) {
+            val planner = SlidePlanner(Random(seed))
+            planner.setPhotos(library)
+            val slides = (1..40).map { planner.next()!! }
+            for (i in 1 until slides.size) {
+                val shared = slides[i - 1].photos.map { it.id }.intersect(slides[i].photos.map { it.id })
+                assertTrue("seed $seed: slides ${i - 1} and $i both show $shared", shared.isEmpty())
+            }
+            val early = slides.take(10).flatMap { s -> s.photos.map { it.id } }.toSet()
+            assertEquals("seed $seed: photos in first 10 slides", setOf("L1", "L2", "L3", "P1", "P2"), early)
+        }
+    }
 }

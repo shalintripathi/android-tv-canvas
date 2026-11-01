@@ -20,6 +20,7 @@ sealed class Slide {
 
 /**
  * Shuffle bag: each photo shows once per round (favourites twice) before anything repeats.
+ * A photo never shows on two consecutive slides while the library has another photo to show instead.
  * Drawing a portrait pulls the next portrait in the bag forward so the two share the screen.
  * Keeps a short history so Left and Right on the remote can step back and forth.
  */
@@ -65,36 +66,21 @@ class SlidePlanner(private val random: Random = Random.Default) {
 
     private fun draw(): Slide? {
         if (photos.isEmpty()) return null
-        if (bag.isEmpty()) refill()
-        val first = bag.removeFirst()
+        // Ids on the slide just shown: nothing on it is drawn again straight away.
+        val last = history.lastOrNull()?.photos?.map { it.id }.orEmpty()
+        // An empty bag, or one holding only copies of that slide, takes a fresh round at the end.
+        if (bag.isEmpty() || bag.all { it.id in last }) refill()
+        // Leftovers stay in front; the first copy not on the last slide goes next.
+        // The coerceAtLeast fallback only matters when the library has nothing else to show.
+        val first = bag.removeAt(bag.indexOfFirst { it.id !in last }.coerceAtLeast(0))
         if (!first.portrait) return Slide.Single(first)
-        val partner = bag.indexOfFirst { it.portrait && it.id != first.id }
+        val partner = bag.indexOfFirst { it.portrait && it.id != first.id && it.id !in last }
         return if (partner < 0) Slide.Single(first) else Slide.Duo(first, bag.removeAt(partner))
     }
 
+    /** Appends one shuffled round to the end of the bag: every photo once, favourites twice. */
     private fun refill() {
-        val round = photos.flatMap { if (it.favorite) listOf(it, it) else listOf(it) }.shuffled(random).toMutableList()
-        // Don't open a round with what closed the last one.
-        val last = history.lastOrNull()?.photos?.map { it.id }.orEmpty()
-        if (round.size > 1 && round[0].id in last) {
-            val j = round.indexOfFirst { it.id !in last }
-            if (j > 0) round[0] = round[j].also { round[j] = round[0] }
-        }
-        // Keep a favourite's two copies apart: move the second copy to the first spot not next to its twin.
-        var i = 1
-        while (i < round.size) {
-            if (round[i].id != round[i - 1].id) {
-                i++
-                continue
-            }
-            val moved = round.removeAt(i)
-            val at = (0..round.size).firstOrNull { p ->
-                (p == 0 || round[p - 1].id != moved.id) && (p == round.size || round[p].id != moved.id)
-            }
-            round.add(at ?: i, moved)
-            if (at == null) i++
-        }
-        bag.addAll(round)
+        bag.addAll(photos.flatMap { if (it.favorite) listOf(it, it) else listOf(it) }.shuffled(random))
     }
 
     private companion object {
