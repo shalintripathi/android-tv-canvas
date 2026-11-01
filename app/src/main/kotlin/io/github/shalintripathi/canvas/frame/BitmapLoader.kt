@@ -34,6 +34,8 @@ object BitmapLoader {
         }
     } catch (e: IOException) {
         null
+    } catch (e: OutOfMemoryError) {
+        null
     }
 
     /** A tiny, softened copy to sit blurred behind a lone portrait. */

@@ -83,33 +83,62 @@ class PhotoLibrary(private val context: Context) {
         BitmapFactory.decodeFile(file.path, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw UnsupportedImageException(UNSUPPORTED)
 
+        // Malformed EXIF can throw runtime exceptions on API 24-27, not just IOException: import without it.
         val exif = try {
             ExifInterface(file.path)
-        } catch (e: IOException) {
+        } catch (e: Exception) {
             null
         }
         val orientation = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
             ?: ExifInterface.ORIENTATION_NORMAL
         val takenAt = exif?.let { exifDate(it) } ?: takenAtHint?.takeIf { it > 0 }
-
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = ImageMath.sampleForLongSide(bounds.outWidth, bounds.outHeight, MAX_SIDE)
-        }
-        val decoded = decodeOrNull(file, options) ?: throw UnsupportedImageException(UNSUPPORTED)
-        val photo = upright(scaled(decoded, MAX_SIDE), orientation)
+        val sample = ImageMath.sampleForLongSide(bounds.outWidth, bounds.outHeight, MAX_SIDE)
 
         val id = LibraryJson.newId()
-        writeJpeg(photo, photoFile(id), 88)
-        writeJpeg(scaled(photo, THUMB_SIDE), thumbFile(id), 80)
-        val entry = PhotoEntry(id, System.currentTimeMillis(), takenAt, photo.width, photo.height, false, "phone")
-        update { it + entry }
-        return entry
+        var stored = false
+        try {
+            val size = try {
+                storeJpegs(file, sample, orientation, id)
+            } catch (e: OutOfMemoryError) {
+                throw UnsupportedImageException(TOO_LARGE)
+            }
+            val entry = PhotoEntry(id, System.currentTimeMillis(), takenAt, size.first, size.second, false, "phone")
+            update { it + entry }
+            stored = true
+            return entry
+        } finally {
+            // A failure after the photo was written must not leave its files behind.
+            if (!stored) {
+                photoFile(id).delete()
+                thumbFile(id).delete()
+            }
+        }
     }
 
-    private fun decodeOrNull(file: File, options: BitmapFactory.Options): Bitmap? = try {
-        BitmapFactory.decodeFile(file.path, options)
-    } catch (e: OutOfMemoryError) {
-        null
+    /** Decodes, scales and rotates the upload, then writes the photo and its thumbnail. Returns the stored size. */
+    private fun storeJpegs(file: File, sample: Int, orientation: Int, id: String): Pair<Int, Int> {
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        var current = BitmapFactory.decodeFile(file.path, options) ?: throw UnsupportedImageException(UNSUPPORTED)
+        try {
+            current = replace(current, scaled(current, MAX_SIDE))
+            current = replace(current, upright(current, orientation))
+            writeJpeg(current, photoFile(id), 88)
+            val thumb = scaled(current, THUMB_SIDE)
+            try {
+                writeJpeg(thumb, thumbFile(id), 80)
+            } finally {
+                if (thumb !== current) thumb.recycle()
+            }
+            return current.width to current.height
+        } finally {
+            current.recycle()
+        }
+    }
+
+    /** Frees [old] once [next] has taken its place. [scaled] and [upright] can hand back their input unchanged. */
+    private fun replace(old: Bitmap, next: Bitmap): Bitmap {
+        if (next !== old) old.recycle()
+        return next
     }
 
     private fun scaled(bitmap: Bitmap, maxSide: Int): Bitmap {
@@ -144,10 +173,15 @@ class PhotoLibrary(private val context: Context) {
 
     private fun writeJpeg(bitmap: Bitmap, target: File, quality: Int) {
         val tmp = File(target.parentFile, target.name + ".tmp")
-        FileOutputStream(tmp).use {
-            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it)) throw IOException("JPEG encode failed")
+        try {
+            FileOutputStream(tmp).use {
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it)) throw IOException("JPEG encode failed")
+            }
+            if (!tmp.renameTo(target)) throw IOException("Could not save photo")
+        } finally {
+            // Gone already after a successful rename; otherwise don't leave a stray .tmp.
+            tmp.delete()
         }
-        if (!tmp.renameTo(target)) throw IOException("Could not save photo")
     }
 
     private fun exifDate(exif: ExifInterface): Long? {
@@ -163,8 +197,10 @@ class PhotoLibrary(private val context: Context) {
 
     private fun update(change: (List<PhotoEntry>) -> List<PhotoEntry>) {
         synchronized(this) {
-            entries = change(entries)
-            index.writeAtomically(LibraryJson.encode(entries))
+            // Write first: if it throws, memory still matches the index on disk and no listener is told.
+            val next = change(entries)
+            index.writeAtomically(LibraryJson.encode(next))
+            entries = next
         }
         main.post { listeners.forEach { it() } }
     }
@@ -176,5 +212,6 @@ class PhotoLibrary(private val context: Context) {
         const val MAX_SIDE = 1920
         const val THUMB_SIDE = 320
         private const val UNSUPPORTED = "This TV can't read that file. Try a JPEG or PNG photo."
+        private const val TOO_LARGE = "This photo is too large for the TV to process. Try a smaller one."
     }
 }
