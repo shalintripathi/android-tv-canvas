@@ -103,6 +103,14 @@ jobs:
           trap 'rm -f "$RUNNER_TEMP/release.p12"' EXIT
           printf '%s' "$CANVAS_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
           export CANVAS_KEYSTORE="$RUNNER_TEMP/release.p12"
+          # The release certificate's SHA-256, for the next step to look for in the APK. A certificate is public.
+          cert="$(keytool -list -v -keystore "$CANVAS_KEYSTORE" -storepass:env CANVAS_KEYSTORE_PASSWORD -alias "$CANVAS_KEY_ALIAS" \
+            | sed -n 's/^[[:space:]]*SHA256: //p' | head -n 1 | tr -d ':' | tr 'A-F' 'a-f')"
+          if [[ ! "$cert" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not read the release certificate's SHA-256 from the keystore"
+            exit 1
+          fi
+          echo "RELEASE_CERT_SHA256=$cert" >> "$GITHUB_ENV"
           ./gradlew --no-daemon assembleRelease -PversionName="$VERSION" -PversionCode="$GITHUB_RUN_NUMBER"
           cp app/build/outputs/apk/release/app-release.apk "canvas-$VERSION.apk"
 
@@ -114,16 +122,24 @@ jobs:
             echo "::error::apksigner not found under \$ANDROID_HOME/build-tools"
             exit 1
           fi
-          echo "Using $apksigner"
-          certs="$("$apksigner" verify --print-certs "canvas-$VERSION.apk")"
-          if ! grep -E "^Signer #[0-9]+ certificate (DN|SHA-256 digest):" <<< "$certs"; then
-            echo "::error::apksigner printed no signer for canvas-$VERSION.apk"
+          echo "Using $apksigner ($("$apksigner" --version))"
+          if [[ ! "${RELEASE_CERT_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then  # an empty pattern would match anything
+            echo "::error::The build step did not record the release certificate's SHA-256"
             exit 1
           fi
-          if grep -q "CN=Android Debug" <<< "$certs"; then
-            echo "::error::canvas-$VERSION.apk is signed with the debug key, not the release key"
+          # Look for the release certificate's own digest, not for apksigner's wording, which changes between
+          # build-tools versions. The debug key has a different digest, so a debug-signed APK fails here too.
+          if ! certs="$("$apksigner" verify --verbose --print-certs "canvas-$VERSION.apk" 2>&1)"; then
+            echo "$certs"
+            echo "::error::canvas-$VERSION.apk does not verify"
             exit 1
           fi
+          if ! tr 'A-F' 'a-f' <<< "$certs" | grep -q -F "$RELEASE_CERT_SHA256"; then
+            echo "$certs"
+            echo "::error::canvas-$VERSION.apk is not signed with the release key (certificate SHA-256 $RELEASE_CERT_SHA256)"
+            exit 1
+          fi
+          echo "canvas-$VERSION.apk is signed with the release key (certificate SHA-256 $RELEASE_CERT_SHA256)"
 
       - name: Upload the signed APK (dry run)
         if: github.event_name == 'workflow_dispatch'
