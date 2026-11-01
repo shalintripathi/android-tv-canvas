@@ -1,5 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Android 10+ only reveals the Wi-Fi name to apps holding location; granted by `pm install -g`. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Both granted over ADB by tools/canvas install, so Canvas can manage its screensaver. -->
+    <uses-permission
+        android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+        </intent>
+        <package android:name="com.mediatek.tv.oneworld.tvcenter" />
+        <package android:name="com.mediatek.wwtv.tvcenter" />
+        <package android:name="com.tcl.tv" />
+        <package android:name="com.sony.dtv.tvx" />
+        <package android:name="com.google.android.tv" />
+    </queries>
 
     <application
         android:name=".CanvasApp"
@@ -8,5 +35,14 @@
         android:icon="@drawable/ic_canvas"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Canvas" />
+        android:theme="@style/Canvas">
+
+        <receiver
+            android:name=".settings.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
 </manifest>
