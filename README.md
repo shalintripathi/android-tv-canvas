@@ -14,7 +14,7 @@ The Phone screen is shown with its QR code, address and PIN blacked out. The scr
 
 ## What you get
 
-- **A clean home screen.** A dock of your favourite apps, every other app one press below, a clock, and your Inputs (HDMI, Live TV) one click away. No ads, no "sponsored" rows, no autoplaying trailers. It is built from plain Android views (no web view, no UI framework). Its start-up time and memory use have not been measured yet; for reference, Google TV's own launcher used about 88 MB of memory while idle on the test TV.
+- **A clean home screen.** A dock of your favourite apps, every other app one press below, a clock, and your Inputs (HDMI, Live TV) one click away. No ads, no "sponsored" rows, no autoplaying trailers. It is built from plain Android views (no web view, no UI framework). On the test TV the release build comes back in about 0.1 s when it is already running (1.1 s from cold) and uses about 43 MB of memory, where Google TV's own launcher used about 88 MB while idle.
 - **A photo-frame screensaver.** Your photos with a slow pan and zoom, soft crossfades, two portrait photos side by side, and a caption like "March 2023 · 3 years ago". Left and Right on the remote flip photos.
 - **Photos from your phone.** Press **Phone** on the home screen, scan the QR code, tap **Add photos**. Your phone's own photo picker opens, so there is nothing to sign in to.
 - **Edit from your phone or the TV.** Reorder the dock, hide apps, change how long each photo stays up. On the TV, hold OK on any app.
@@ -87,9 +87,9 @@ Nothing is uninstalled. Apps are only switched off for the main user, and `tools
 
 | TV | Android | Status |
 |---|---|---|
-| Sony BRAVIA (BF1) | 12, Google TV | Home screen, screensaver and phone page work, with photos added from an iPhone. `install` was exercised on it with an earlier version that switched off Google TV's two home apps by name; the generic home-app detection that replaced it is new and so far tested offline only. `restore` has only been tested offline and has not yet run on a TV. `debloat` has been applied for the "Sony promos" group only. |
+| Sony BRAVIA (BF1) | 12, Google TV | Home screen, screensaver and phone page work, with photos added from an iPhone. `restore` and `restore --uninstall` put Google TV's home screen and screensaver back. `install` then found Google TV's two home apps, asked, and after the yes switched them off and made the release build the home screen and screensaver. `debloat` has been applied for the "Sony promos" group only. |
 
-Not yet checked on a TV: `restore`, the generic home-app detection and the new question in `install`, the phone page's local-network checks, Canvas's start-up time and memory use, whether the remote's voice button still behaves as before once the TV's own home app is off, the Left and Right keys during the screensaver, the screensaver staying away while a video plays, and adding photos from an Android phone.
+Not yet checked on a TV: the phone page's local-network checks, the Left and Right keys during the screensaver, the screensaver staying away while a video plays, adding photos from an Android phone, and the remote's physical voice button (the Assistant key, sent over ADB, still opens Google Assistant over Canvas).
 
 **Expected to work, but untested.** Canvas needs Android 7.0 (API 24) or newer. These should work:
 
@@ -103,7 +103,7 @@ Some makers lock their launcher so it cannot be switched off. In that case `tool
 ## FAQ
 
 **How do I remove ads from the Android TV or Google TV home screen?**
-The ads and sponsored rows are part of the TV's own launcher: Google's launcher on Google TV (`com.google.android.apps.tv.launcherx`), or the maker's launcher on other Android TVs. Canvas replaces whichever one your TV has. `tools/canvas install` finds the TV's home apps, lists them and asks you, then switches them off (reversibly, with a backup) and makes Canvas the home app. Your installed apps stay installed. Install only switches off packages that offer themselves as a home screen, not the Play Store or voice search, but whether the remote's voice button still behaves as before has not been checked yet.
+The ads and sponsored rows are part of the TV's own launcher: Google's launcher on Google TV (`com.google.android.apps.tv.launcherx`), or the maker's launcher on other Android TVs. Canvas replaces whichever one your TV has. `tools/canvas install` finds the TV's home apps, lists them and asks you, then switches them off (reversibly, with a backup) and makes Canvas the home app. Your installed apps stay installed. Install only switches off packages that offer themselves as a home screen, not the Play Store or voice search. On the test TV, with Google TV's home apps switched off, the Assistant key still opens Google Assistant over Canvas.
 
 **Does it work on my TV?**
 It is tested on one TV, a Sony BRAVIA running Google TV. Other Android TV and Google TV devices are expected to work. See [Tested on](#tested-on), and please tell us how it goes on yours.
