@@ -64,6 +64,7 @@ class FakeTV:
         self.fail_on = None  # raise when a command contains this text (the ADB link dropped)
         self.ignore = ()  # commands starting with one of these do nothing, as if the TV refused them
         self.on_command = None  # called with each command before it is answered
+        self.pm_errors = {}  # package -> what pm prints instead of changing it (see UNKNOWN_PACKAGE)
 
     def close(self):
         self.closed = True
@@ -144,6 +145,8 @@ class FakeTV:
             self.preferred = component
             self._resolve_home()
             return "Success"
+        if command.startswith(("pm disable-user", "pm enable")) and words[-1] in self.pm_errors:
+            return self.pm_errors[words[-1]]
         if command.startswith("pm disable-user"):
             self.packages[words[-1]] = False
             self._resolve_home()
@@ -507,7 +510,8 @@ LOOSE = ["com.loose.first"]
 
 
 class Answers:
-    """Stands in for input(): hands out the typed answers, records every prompt, and hits end of input after the last."""
+    """Stands in for input(): hands out the typed answers, records every prompt, and hits end of input after the last.
+    An exception class in the list is raised instead of returned (KeyboardInterrupt for Ctrl-C)."""
 
     def __init__(self, *answers):
         self.answers = list(answers)
@@ -517,7 +521,18 @@ class Answers:
         self.prompts.append(prompt)
         if not self.answers:
             raise EOFError
-        return self.answers.pop(0)
+        answer = self.answers.pop(0)
+        if isinstance(answer, type) and issubclass(answer, BaseException):
+            raise answer
+        return answer
+
+
+def unknown_package(pkg, command="disable-user"):
+    """pm's report for a package the TV does not have: an exception, not a `new state:` line."""
+    return (f"Exception occurred while executing '{command}':\n"
+            f"java.lang.IllegalArgumentException: Unknown package: {pkg}\n"
+            "\tat com.android.server.pm.PackageManagerShellCommand.runSetEnabledSetting"
+            "(PackageManagerShellCommand.java:1930)")
 
 
 def never_asked(prompt):
@@ -633,6 +648,13 @@ class DebloatPromptTests(TvTestCase):
         os.makedirs(os.path.dirname(self.list), exist_ok=True)
         with open(self.list, "w") as f:
             f.write(DEVICE_LIST)
+        self.connects = 0
+
+        def connect():
+            self.connects += 1
+            return self.tv
+
+        self.patch(canvas, "connect", connect)
 
     def disabled(self):
         return [c.split()[-1] for c in self.tv.issued("pm disable-user")]
@@ -683,14 +705,30 @@ class DebloatPromptTests(TvTestCase):
             canvas.cmd_debloat([self.list, "--force"], ask=never_asked)
         self.assertEqual(self.tv.commands, [])
 
-    def test_no_input_to_read_skips_everything_and_says_how_to_apply_without_asking(self):
-        canvas.cmd_debloat([self.list], ask=Answers())  # EOF on the first question
+    def assert_cancelled(self, ask):
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list], ask=ask)
+        self.assertNotEqual(exit_status(raised.exception), 0)
+        self.assertIn("Cancelled", raised.exception.code)
+        self.assertIn("--yes", raised.exception.code)  # says how to apply without questions
         self.assertEqual(self.tv.commands, [])
-        self.assertIn("--yes", self.stdout.getvalue())
+        self.assertEqual(self.connects, 0)  # the TV was never even contacted
 
-    def test_no_input_after_some_answers_keeps_the_answers_given(self):
-        canvas.cmd_debloat([self.list], ask=Answers("n", "y"))  # then end of input
-        self.assertEqual(self.disabled(), PROMOS)
+    def test_end_of_input_at_the_first_question_cancels_the_run(self):
+        self.assert_cancelled(Answers())
+
+    def test_end_of_input_after_a_yes_cancels_the_whole_run_and_applies_nothing(self):
+        self.assert_cancelled(Answers("n", "y"))  # Sony promos was answered yes, then Ctrl-D
+
+    def test_ctrl_c_at_any_question_cancels_the_run_too(self):
+        self.assert_cancelled(Answers(KeyboardInterrupt))
+        self.assert_cancelled(Answers("y", "y", KeyboardInterrupt))
+
+    def test_undebloat_cancels_the_same_way(self):
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list], enable=True, ask=Answers("y", KeyboardInterrupt))
+        self.assertIn("Cancelled", raised.exception.code)
+        self.assertEqual((self.tv.commands, self.connects), ([], 0))
 
     def test_undebloat_asks_to_re_enable_and_enables_only_the_groups_answered_yes(self):
         for pkg in LOOSE + PROMOS + EXTRAS + HELP:
@@ -723,6 +761,82 @@ class DebloatPromptTests(TvTestCase):
     def test_the_closing_line_names_what_was_done_and_what_was_left_alone(self):
         canvas.cmd_debloat([self.list, "--group", "Sony promos"], ask=never_asked)
         self.assertIn("Disabled: Sony promos. Left alone: Other, Google extras, Sony help apps.", self.stdout.getvalue())
+
+    def test_a_package_pm_rejects_is_reported_not_called_disabled_and_the_run_goes_on(self):
+        self.tv.pm_errors[PROMOS[0]] = unknown_package(PROMOS[0])
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list, "--group", "Sony promos"], ask=never_asked)
+        self.assertEqual(exit_status(raised.exception), 1)
+        self.assertEqual(self.disabled(), PROMOS)  # it still went on to the next package
+        self.assertFalse(self.tv.packages[PROMOS[1]])
+        shown = self.stdout.getvalue()
+        self.assertIn("Disabled with problems: Sony promos (com.sony.dtv.promos: Exception occurred while executing "
+                      "'disable-user': java.lang.IllegalArgumentException: Unknown package: com.sony.dtv.promos)", shown)
+        self.assertNotIn("Disabled: Sony promos", shown)
+
+    def test_groups_that_worked_and_groups_with_problems_are_listed_apart(self):
+        self.tv.pm_errors[EXTRAS[1]] = "java.lang.SecurityException: Shell cannot change component state"
+        self.tv.pm_errors[HELP[0]] = ""  # pm said nothing at all
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list, "--yes"], ask=never_asked)
+        self.assertEqual(exit_status(raised.exception), 1)
+        self.assertEqual(self.disabled(), LOOSE + PROMOS + EXTRAS + HELP)
+        self.assertIn("Disabled: Other, Sony promos. Disabled with problems: "
+                      "Google extras (com.google.android.feedback: java.lang.SecurityException: Shell cannot change "
+                      "component state), Sony help apps (com.sony.dtv.smarthelp: no output from pm).",
+                      self.stdout.getvalue())
+
+    def test_several_failures_in_one_group_are_all_named(self):
+        for pkg in PROMOS:
+            self.tv.pm_errors[pkg] = f"Error: Unknown package: {pkg}"
+        with self.assertRaises(SystemExit):
+            canvas.cmd_debloat([self.list, "--group", "sony promos"], ask=never_asked)
+        self.assertIn("Sony promos (com.sony.dtv.promos: Error: Unknown package: com.sony.dtv.promos; "
+                      "com.sony.dtv.sonytab: Error: Unknown package: com.sony.dtv.sonytab)", self.stdout.getvalue())
+
+    def test_a_pm_that_answers_nothing_is_a_failure_too(self):
+        self.tv.ignore = ("pm disable-user",)
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list, "--group", "Sony help apps"], ask=never_asked)
+        self.assertEqual(exit_status(raised.exception), 1)
+        self.assertIn("Disabled with problems: Sony help apps (com.sony.dtv.smarthelp: no output from pm)",
+                      self.stdout.getvalue())
+
+    def test_failures_after_answering_questions_still_exit_non_zero_and_name_what_was_left_alone(self):
+        self.tv.pm_errors[PROMOS[1]] = unknown_package(PROMOS[1])
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list], ask=Answers("n", "y", "", "n"))
+        self.assertEqual(exit_status(raised.exception), 1)
+        self.assertIn("Left alone: Other, Google extras, Sony help apps.", self.stdout.getvalue())
+
+    def test_undebloat_checks_for_new_state_enabled_and_reports_the_rest(self):
+        for pkg in LOOSE + PROMOS + EXTRAS + HELP:
+            self.tv.packages[pkg] = False
+        self.tv.pm_errors[PROMOS[0]] = unknown_package(PROMOS[0], "enable")
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list, "--yes"], enable=True, ask=never_asked)
+        self.assertEqual(exit_status(raised.exception), 1)
+        self.assertEqual(len(self.tv.issued("pm enable")), len(LOOSE + PROMOS + EXTRAS + HELP))
+        self.assertFalse(self.tv.packages[PROMOS[0]])
+        self.assertTrue(self.tv.packages[PROMOS[1]])
+        shown = self.stdout.getvalue()
+        self.assertIn("Re-enabled: Other, Google extras, Sony help apps. Re-enabled with problems: Sony promos "
+                      "(com.sony.dtv.promos: Exception occurred while executing 'enable': "
+                      "java.lang.IllegalArgumentException: Unknown package: com.sony.dtv.promos)", shown)
+        self.assertNotIn("Disabled", shown)
+
+    def test_a_disable_answer_is_not_accepted_as_an_enable(self):
+        self.tv.pm_errors[PROMOS[0]] = f"Package {PROMOS[0]} new state: disabled-user"  # pm says the wrong state
+        with self.assertRaises(SystemExit):
+            canvas.cmd_debloat([self.list, "--group", "Sony promos"], enable=True, ask=never_asked)
+        self.assertIn("Re-enabled with problems: Sony promos", self.stdout.getvalue())
+
+    def test_main_exits_non_zero_when_a_package_failed(self):
+        self.tv.pm_errors[PROMOS[0]] = unknown_package(PROMOS[0])
+        with mock.patch.object(sys, "argv", ["canvas.py", "debloat", self.list, "--group", "Sony promos"]), \
+                self.assertRaises(SystemExit) as raised:
+            canvas.main()
+        self.assertEqual(exit_status(raised.exception), 1)
 
     def test_main_routes_debloat_and_undebloat_and_asks_through_input(self):
         with mock.patch.object(sys, "argv", ["canvas.py", "debloat", self.list]), \

@@ -610,7 +610,8 @@ def show_group(name, packages):
 
 
 def choose_groups(groups, everything, only, question, ask):
-    """The groups to act on. Without --yes or --group, show each group and ask; anything but y/yes is No."""
+    """The groups to act on. Without --yes or --group, show each group and ask; anything but y/yes is No.
+    End of input (Ctrl-D) or Ctrl-C at any question cancels the whole run: nothing is applied."""
     if everything:
         return groups
     if only is not None:
@@ -620,12 +621,21 @@ def choose_groups(groups, everything, only, question, ask):
         show_group(*group)
         try:
             answer = ask(f"{question} this group? [y/N] ")
-        except EOFError:
-            print("\nNo answer to read, so the remaining groups are skipped. Use --yes to apply without asking.")
-            break
+        except (EOFError, KeyboardInterrupt):
+            sys.exit("\nCancelled. Nothing was changed on the TV. "
+                     "To apply without questions, use --yes or --group \"<name>\".")
         if answer.strip().lower() in ("y", "yes"):
             chosen.append(group)
     return chosen
+
+
+def first_line(output):
+    """What pm said, in one line for the summary: its first line, plus the next one when that first line ends in
+    a colon (an exception is reported as `Exception occurred while executing 'x':` then the exception itself)."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return "no output from pm"
+    return f"{lines[0]} {lines[1]}" if lines[0].endswith(":") and len(lines) > 1 else lines[0]
 
 
 def cmd_debloat(args, enable=False, ask=None):
@@ -636,14 +646,27 @@ def cmd_debloat(args, enable=False, ask=None):
     if not chosen:
         print("\nNothing selected. The TV was not touched.")
         return
+    done = "new state: enabled" if enable else "new state: disabled-user"  # what pm prints when it worked
+    problems = {}  # group name -> [(package, what pm said)]
     with tv() as dev:
         for name, packages in chosen:
             print(f"\n{name}")
             for pkg, _ in packages:
-                run(dev, f"pm enable {pkg}" if enable else f"pm disable-user --user 0 {pkg}")
-    skipped = [name for name, _ in groups if name not in [n for n, _ in chosen]]
-    print(f"\n{'Re-enabled' if enable else 'Disabled'}: " + ", ".join(name for name, _ in chosen)
-          + (f". Left alone: {', '.join(skipped)}." if skipped else "."))
+                out = run(dev, f"pm enable {pkg}" if enable else f"pm disable-user --user 0 {pkg}")
+                if done not in out:
+                    problems.setdefault(name, []).append((pkg, first_line(out)))
+    verb = "Re-enabled" if enable else "Disabled"
+    summary = []
+    if any(name not in problems for name, _ in chosen):
+        summary.append(f"{verb}: " + ", ".join(name for name, _ in chosen if name not in problems))
+    if problems:
+        summary.append(f"{verb} with problems: " + ", ".join(
+            f"{name} (" + "; ".join(f"{pkg}: {why}" for pkg, why in failed) + ")" for name, failed in problems.items()))
+    if len(chosen) < len(groups):
+        summary.append("Left alone: " + ", ".join(name for name, _ in groups if name not in [n for n, _ in chosen]))
+    print("\n" + ". ".join(summary) + ".")
+    if problems:
+        sys.exit(1)
 
 
 def main():
