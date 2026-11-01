@@ -201,10 +201,20 @@ def tv_host():
     return host
 
 
+def private_only(path, mode):
+    """Set `path` to `mode` unless it already is (a key made by an older version may be readable by everyone)."""
+    if os.stat(path).st_mode & 0o777 != mode:
+        os.chmod(path, mode)
+
+
 def signer():
-    os.makedirs(os.path.dirname(KEY), exist_ok=True)
+    """The ADB key in tools/adbkey/. Whoever can read it can drive the TV, so only you can: folder 0700, key 0600."""
+    folder = os.path.dirname(KEY)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    private_only(folder, 0o700)
     if not os.path.exists(KEY):
         keygen(KEY)
+    private_only(KEY, 0o600)
     with open(KEY) as private, open(KEY + ".pub") as public:
         return PythonRSASigner(public.read(), private.read())
 

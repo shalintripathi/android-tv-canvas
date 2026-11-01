@@ -1254,6 +1254,53 @@ class SameComponentTests(unittest.TestCase):
         self.assertTrue(canvas.same_component("", ""))
 
 
+class AdbKeyTests(unittest.TestCase):
+    """Whoever can read tools/adbkey/adbkey can drive the TV, so the key is the owner's alone."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = os.path.join(tmp.name, "adbkey")
+        self.key = os.path.join(self.folder, "adbkey")
+        for name, value in (("KEY", self.key), ("keygen", self.fake_keygen),
+                            ("PythonRSASigner", lambda public, private: (public, private))):
+            patcher = mock.patch.object(canvas, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def fake_keygen(path):
+        """Writes the pair the way adb-shell's keygen does: plain open(), so the umask decides (usually 0644)."""
+        for name, text in ((path, "PRIVATE"), (path + ".pub", "PUBLIC")):
+            with open(name, "w") as f:
+                f.write(text)
+            os.chmod(name, 0o644)
+
+    def mode(self, path):
+        return os.stat(path).st_mode & 0o777
+
+    def test_a_new_key_is_made_in_a_0700_folder_and_is_0600(self):
+        self.assertEqual(canvas.signer(), ("PUBLIC", "PRIVATE"))
+        self.assertEqual(self.mode(self.folder), 0o700)
+        self.assertEqual(self.mode(self.key), 0o600)
+
+    def test_a_key_left_readable_by_an_older_version_is_tightened(self):
+        os.makedirs(self.folder)
+        os.chmod(self.folder, 0o755)
+        self.fake_keygen(self.key)
+        canvas.signer()
+        self.assertEqual(self.mode(self.folder), 0o700)
+        self.assertEqual(self.mode(self.key), 0o600)
+        with open(self.key) as f:
+            self.assertEqual(f.read(), "PRIVATE")  # the same key: the TV's "Allow USB debugging?" stays accepted
+
+    def test_a_key_that_is_already_private_is_left_alone(self):
+        canvas.signer()
+        with mock.patch.object(canvas.os, "chmod") as chmod:
+            canvas.signer()
+        chmod.assert_not_called()
+
+
 class RequirementsTests(unittest.TestCase):
     """Finding 6: the bulk_write patch was validated against one adb-shell version."""
 
