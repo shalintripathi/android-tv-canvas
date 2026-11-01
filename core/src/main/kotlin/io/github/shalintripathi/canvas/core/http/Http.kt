@@ -6,7 +6,8 @@ import java.io.File
 import java.io.InputStream
 import java.net.URLDecoder
 
-class HttpException(val status: Int, message: String) : Exception(message)
+/** [bodyLength] is the declared Content-Length when the parser knows it (413), otherwise -1. */
+class HttpException(val status: Int, message: String, internal val bodyLength: Long = -1L) : Exception(message)
 
 class HttpRequest(
     val method: String,
@@ -77,19 +78,24 @@ fun interface HttpHandler {
     fun handle(request: HttpRequest): HttpResponse
 }
 
-/** Body stream that stops after Content-Length bytes and never closes the socket. */
+/**
+ * Body stream that stops after Content-Length bytes and never closes the socket.
+ * If the client ends the stream before Content-Length bytes arrive, reads throw EOFException.
+ */
 class LimitedInputStream(private val input: InputStream, private var remaining: Long) : InputStream() {
     override fun read(): Int {
         if (remaining <= 0) return -1
         val b = input.read()
-        if (b < 0) remaining = 0 else remaining--
+        if (b < 0) throw EOFException("Body ended early")
+        remaining--
         return b
     }
 
     override fun read(b: ByteArray, off: Int, len: Int): Int {
         if (remaining <= 0) return -1
         val n = input.read(b, off, minOf(len.toLong(), remaining).toInt())
-        if (n < 0) remaining = 0 else remaining -= n
+        if (n < 0) throw EOFException("Body ended early")
+        remaining -= n
         return n
     }
 
@@ -121,7 +127,7 @@ object HttpParser {
         if (headers.containsKey("transfer-encoding")) throw HttpException(501, "Chunked bodies are not supported")
         val length = headers["content-length"]?.let { it.toLongOrNull() ?: throw HttpException(400, "Bad Content-Length") } ?: 0L
         if (length < 0) throw HttpException(400, "Bad Content-Length")
-        if (length > maxBody) throw HttpException(413, "Body too large")
+        if (length > maxBody) throw HttpException(413, "Body too large", length)
         return HttpRequest(parts[0].uppercase(), path, query, headers, length, LimitedInputStream(input, length))
     }
 

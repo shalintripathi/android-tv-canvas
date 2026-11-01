@@ -70,4 +70,22 @@ class HttpParserTest {
     fun missingCookieHeaderMeansNoCookies() {
         assertNull(parse("GET / HTTP/1.1\r\n\r\n").cookies["canvas_session"])
     }
+
+    @Test
+    fun bodyEndingEarlyThrowsOnSingleByteReads() {
+        val body = parse("PUT /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhi").body
+        assertEquals('h'.code, body.read())
+        assertEquals('i'.code, body.read())
+        try {
+            body.read()
+            fail("expected EOFException")
+        } catch (e: EOFException) {
+            assertEquals("Body ended early", e.message)
+        }
+    }
+
+    @Test(expected = EOFException::class)
+    fun bodyEndingEarlyThrowsOnBulkReads() {
+        parse("PUT /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhi").body.readBytes()
+    }
 }
