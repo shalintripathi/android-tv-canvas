@@ -1,0 +1,29 @@
+# Sony BRAVIA BF1 (MediaTek mt5896), Android 12 (API 31) Google TV, build STT2.230811.001 (from `tools/canvas probe`)
+# Apply: tools/canvas debloat devices/sony-bravia-bf1.txt      (asks about each group, default No)
+#        tools/canvas debloat devices/sony-bravia-bf1.txt --group "Sony promos"   (one group, no questions)
+#        tools/canvas debloat devices/sony-bravia-bf1.txt --yes                   (every group, no questions)
+# Undo:  tools/canvas undebloat devices/sony-bravia-bf1.txt     (same options)
+# Everything is DISABLED for user 0, never uninstalled. Take a group you use out of the list, or answer N.
+
+## Sony promos
+com.sony.dtv.promos                          # Sony promotional content
+com.sony.dtv.sonytab                         # the "Sony" content tab of the stock launcher
+com.sony.dtv.sonyselect                      # Sony Select, Sony's app recommendations
+android.autoinstalls.config.sony.bluefin     # Sony's list of apps to install by themselves after setup
+com.sony.dtv.demosupport                     # shop demo mode
+com.sony.dtv.demosystemsupport               # shop demo mode, system part
+com.sony.dtv.multiscreendemo                 # shop demo for several screens
+
+## Google extras
+com.google.android.videos                    # Google TV app / Play Movies & TV
+com.google.android.play.games                # Google Play Games
+com.google.android.feedback                  # sends feedback and bug reports to Google
+
+## Sony help apps
+com.sony.dtv.smarthelp                       # Sony's built-in help
+com.sony.dtv.ecodashboard                    # eco dashboard (power-saving tips)
+com.sony.dtv.notificationcenter              # Sony notification center (messages from Sony)
+com.sony.dtv.m2.seeds.iot                    # Sony smart-home (IoT) service
+
+## BRAVIA CORE
+com.sonypicturescore                         # BRAVIA CORE, Sony Pictures' movie streaming

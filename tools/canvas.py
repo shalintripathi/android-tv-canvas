@@ -9,8 +9,13 @@
                                            install Canvas; without --app-only also make it the
                                            home screen and screensaver (backs up first)
     tools/canvas restore [--uninstall]     undo `install` from the backup
-    tools/canvas debloat <list>            disable the packages in a list (reversible)
-    tools/canvas undebloat <list>          re-enable them
+    tools/canvas debloat <list> [--yes | --group "<name>"]
+                                           disable packages from a device list (reversible). The list groups
+                                           packages under `## Name` lines; each group is shown and you are
+                                           asked about it (default No). --yes applies every group without
+                                           asking, --group applies just that one.
+    tools/canvas undebloat <list> [--yes | --group "<name>"]
+                                           the same, re-enabling
 
 The TV address comes from $TV_HOST or tools/.tv_host (written by `find`).
 """
@@ -21,6 +26,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import select
 import socket
 import subprocess
@@ -521,15 +527,123 @@ def cmd_restore(args):
         print("Restored the TV's previous home screen and screensaver.")
 
 
-def read_list(path):
-    with open(path) as f:
-        return [line.split("#", 1)[0].strip() for line in f if line.split("#", 1)[0].strip()]
+OTHER = "Other"
+PACKAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+")
+DEBLOAT_USAGE = 'usage: tools/canvas debloat|undebloat <list> [--yes | --group "<name>"]'
 
 
-def cmd_debloat(path, enable=False):
+def parse_groups(text, source="the list"):
+    """A device list as [(group name, [(package, description)])], in file order.
+
+    `## Name` starts a group. Every other non-blank line is `package  # description`; a line that starts
+    with a single `#` is a comment. Packages above the first `## ` header belong to the group "Other".
+    A name that appears twice is one group. Groups with no packages are dropped."""
+    groups = {}  # lower-cased name -> (name, {package: description})
+    current = None
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if line.startswith("##"):
+            current = line.lstrip("#").strip()
+            if not current:
+                sys.exit(f"{source} line {number}: a `##` group header needs a name")
+            groups.setdefault(current.lower(), (current, {}))
+            continue
+        code, _, description = line.partition("#")
+        pkg = code.strip()
+        if not pkg:
+            continue
+        if not PACKAGE_NAME.fullmatch(pkg):
+            sys.exit(f"{source} line {number}: {pkg!r} is not a package name (one per line, then an optional # note)")
+        _, packages = groups.setdefault((current or OTHER).lower(), (current or OTHER, {}))
+        packages.setdefault(pkg, description.strip())
+    return [(name, list(packages.items())) for name, packages in groups.values() if packages]
+
+
+def read_groups(path):
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as e:
+        sys.exit(f"Can't read {path}: {e.strerror}")
+    groups = parse_groups(text, os.path.basename(path))
+    if not groups:
+        sys.exit(f"{path} lists no packages.")
+    return groups
+
+
+def find_group(groups, name):
+    for group in groups:
+        if group[0].lower() == name.strip().lower():
+            return group
+    sys.exit(f"No group named {name!r}. The groups in this list are: " + ", ".join(repr(g[0]) for g in groups))
+
+
+def parse_debloat_args(args):
+    """(list path, apply everything?, the one group to apply or None). Rejects anything else."""
+    path, everything, only = None, False, None
+    rest = iter(args)
+    for arg in rest:
+        if arg == "--yes":
+            everything = True
+        elif arg == "--group":
+            only = next(rest, None)
+            if only is None or only.startswith("-"):
+                sys.exit('--group needs a group name, for example --group "Sony promos"\n' + DEBLOAT_USAGE)
+        elif arg.startswith("-"):
+            sys.exit(f"Unknown option {arg}\n" + DEBLOAT_USAGE)
+        elif path is None:
+            path = arg
+        else:
+            sys.exit(f"Unexpected argument {arg!r}\n" + DEBLOAT_USAGE)
+    if path is None:
+        sys.exit(DEBLOAT_USAGE)
+    if everything and only is not None:
+        sys.exit("Use --yes or --group, not both.\n" + DEBLOAT_USAGE)
+    return path, everything, only
+
+
+def show_group(name, packages):
+    print(f"\n{name}")
+    width = max(len(pkg) for pkg, _ in packages)
+    for pkg, description in packages:
+        print(f"  {pkg:<{width}}  {description}".rstrip())
+
+
+def choose_groups(groups, everything, only, question, ask):
+    """The groups to act on. Without --yes or --group, show each group and ask; anything but y/yes is No."""
+    if everything:
+        return groups
+    if only is not None:
+        return [find_group(groups, only)]
+    chosen = []
+    for group in groups:
+        show_group(*group)
+        try:
+            answer = ask(f"{question} this group? [y/N] ")
+        except EOFError:
+            print("\nNo answer to read, so the remaining groups are skipped. Use --yes to apply without asking.")
+            break
+        if answer.strip().lower() in ("y", "yes"):
+            chosen.append(group)
+    return chosen
+
+
+def cmd_debloat(args, enable=False, ask=None):
+    ask = ask or input
+    path, everything, only = parse_debloat_args(args)
+    groups = read_groups(path)
+    chosen = choose_groups(groups, everything, only, "Re-enable" if enable else "Disable", ask)
+    if not chosen:
+        print("\nNothing selected. The TV was not touched.")
+        return
     with tv() as dev:
-        for pkg in read_list(path):
-            run(dev, f"pm enable {pkg}" if enable else f"pm disable-user --user 0 {pkg}")
+        for name, packages in chosen:
+            print(f"\n{name}")
+            for pkg, _ in packages:
+                run(dev, f"pm enable {pkg}" if enable else f"pm disable-user --user 0 {pkg}")
+    skipped = [name for name, _ in groups if name not in [n for n, _ in chosen]]
+    print(f"\n{'Re-enabled' if enable else 'Disabled'}: " + ", ".join(name for name, _ in chosen)
+          + (f". Left alone: {', '.join(skipped)}." if skipped else "."))
 
 
 def main():
@@ -548,10 +662,8 @@ def main():
         cmd_install(args[1:])
     elif command == "restore":
         cmd_restore(args[1:])
-    elif command == "debloat" and len(args) > 1:
-        cmd_debloat(args[1])
-    elif command == "undebloat" and len(args) > 1:
-        cmd_debloat(args[1], enable=True)
+    elif command in ("debloat", "undebloat") and len(args) > 1:
+        cmd_debloat(args[1:], enable=command == "undebloat")
     else:
         print(__doc__)
 

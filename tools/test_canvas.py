@@ -482,6 +482,259 @@ class BackupRefusalTests(TvTestCase):
         self.assertEqual(read_bytes(self.backup_file), before)
 
 
+DEVICE_LIST = textwrap.dedent("""\
+    # Sony BRAVIA (BF1), Android 12
+    # Apply: tools/canvas debloat devices/sony-bravia-bf1.txt
+
+    com.loose.first            # sits above every header
+
+    ## Sony promos
+    com.sony.dtv.promos        # Sony promotional content
+    com.sony.dtv.sonytab       # the "Sony" tab
+
+    ## Google extras
+    # a note about the group is a comment, not a package
+    com.google.android.videos  # Google TV
+    com.google.android.feedback
+
+    ## Sony help apps
+    com.sony.dtv.smarthelp     # on-screen help
+    """)
+PROMOS = ["com.sony.dtv.promos", "com.sony.dtv.sonytab"]
+EXTRAS = ["com.google.android.videos", "com.google.android.feedback"]
+HELP = ["com.sony.dtv.smarthelp"]
+LOOSE = ["com.loose.first"]
+
+
+class Answers:
+    """Stands in for input(): hands out the typed answers, records every prompt, and hits end of input after the last."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.prompts = []
+
+    def __call__(self, prompt):
+        self.prompts.append(prompt)
+        if not self.answers:
+            raise EOFError
+        return self.answers.pop(0)
+
+
+def never_asked(prompt):
+    raise AssertionError(f"asked a question it should not have: {prompt!r}")
+
+
+class DeviceListParsingTests(unittest.TestCase):
+
+    def test_groups_come_back_in_file_order_with_loose_lines_in_other(self):
+        groups = canvas.parse_groups(DEVICE_LIST)
+        self.assertEqual([name for name, _ in groups], ["Other", "Sony promos", "Google extras", "Sony help apps"])
+        self.assertEqual([[pkg for pkg, _ in packages] for _, packages in groups], [LOOSE, PROMOS, EXTRAS, HELP])
+
+    def test_each_package_keeps_its_description_and_a_bare_package_has_none(self):
+        groups = dict(canvas.parse_groups(DEVICE_LIST))
+        self.assertEqual(groups["Sony promos"], [("com.sony.dtv.promos", "Sony promotional content"),
+                                                 ("com.sony.dtv.sonytab", 'the "Sony" tab')])
+        self.assertEqual(groups["Google extras"], [("com.google.android.videos", "Google TV"),
+                                                   ("com.google.android.feedback", "")])
+
+    def test_header_comments_blank_lines_and_notes_are_not_packages(self):
+        every = [pkg for _, packages in canvas.parse_groups(DEVICE_LIST) for pkg, _ in packages]
+        self.assertEqual(every, LOOSE + PROMOS + EXTRAS + HELP)
+
+    def test_a_list_with_no_headers_is_one_group_called_other(self):
+        groups = canvas.parse_groups("# just a list\ncom.a.b  # first\ncom.c.d\n")
+        self.assertEqual(groups, [("Other", [("com.a.b", "first"), ("com.c.d", "")])])
+
+    def test_the_same_group_name_twice_is_one_group_and_a_repeated_package_counts_once(self):
+        groups = canvas.parse_groups("## Sony\ncom.a.b\n## Google\ncom.c.d\n## sony\ncom.e.f\ncom.a.b\n")
+        self.assertEqual(groups, [("Sony", [("com.a.b", ""), ("com.e.f", "")]), ("Google", [("com.c.d", "")])])
+
+    def test_a_group_with_no_packages_is_dropped(self):
+        self.assertEqual(canvas.parse_groups("## Empty\n## Full\ncom.a.b\n"), [("Full", [("com.a.b", "")])])
+
+    def test_something_that_is_not_a_package_name_is_refused_with_its_line_number(self):
+        for bad in ("rm -rf /", "com.a.b com.c.d", "nodots", "com.a.b;reboot"):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit) as raised:
+                canvas.parse_groups(f"## G\ncom.fine.one\n{bad}\n", "list.txt")
+            self.assertIn("list.txt line 3", raised.exception.code)
+
+    def test_a_header_without_a_name_is_refused(self):
+        with self.assertRaises(SystemExit) as raised:
+            canvas.parse_groups("##\ncom.a.b\n")
+        self.assertIn("needs a name", raised.exception.code)
+
+    def test_find_group_ignores_case_and_lists_the_names_when_there_is_no_match(self):
+        groups = canvas.parse_groups(DEVICE_LIST)
+        self.assertEqual(canvas.find_group(groups, "  SONY promos ")[0], "Sony promos")
+        with self.assertRaises(SystemExit) as raised:
+            canvas.find_group(groups, "Sony")
+        self.assertIn("'Sony promos'", raised.exception.code)
+        self.assertIn("'Google extras'", raised.exception.code)
+
+    def test_the_committed_sony_list_has_the_four_groups_the_owner_was_shown(self):
+        path = os.path.join(TOOLS, os.pardir, "devices", "sony-bravia-bf1.txt")
+        groups = canvas.read_groups(path)
+        self.assertEqual([name for name, _ in groups], ["Sony promos", "Google extras", "Sony help apps", "BRAVIA CORE"])
+        self.assertEqual([[pkg for pkg, _ in packages] for _, packages in groups], [
+            ["com.sony.dtv.promos", "com.sony.dtv.sonytab", "com.sony.dtv.sonyselect",
+             "android.autoinstalls.config.sony.bluefin", "com.sony.dtv.demosupport", "com.sony.dtv.demosystemsupport",
+             "com.sony.dtv.multiscreendemo"],
+            ["com.google.android.videos", "com.google.android.play.games", "com.google.android.feedback"],
+            ["com.sony.dtv.smarthelp", "com.sony.dtv.ecodashboard", "com.sony.dtv.notificationcenter",
+             "com.sony.dtv.m2.seeds.iot"],
+            ["com.sonypicturescore"]])
+        self.assertTrue(all(description for _, packages in groups for _, description in packages),
+                        "every package in the committed list should say what it is")
+
+    def test_a_missing_list_file_is_a_message_not_a_traceback(self):
+        with self.assertRaises(SystemExit) as raised:
+            canvas.read_groups(os.path.join(TOOLS, "no-such-list.txt"))
+        self.assertIn("Can't read", raised.exception.code)
+
+
+class DebloatArgumentTests(unittest.TestCase):
+
+    def test_a_list_alone_means_ask_for_each_group(self):
+        self.assertEqual(canvas.parse_debloat_args(["list.txt"]), ("list.txt", False, None))
+
+    def test_yes_and_group_are_understood_wherever_they_come(self):
+        self.assertEqual(canvas.parse_debloat_args(["list.txt", "--yes"]), ("list.txt", True, None))
+        self.assertEqual(canvas.parse_debloat_args(["--group", "Sony promos", "list.txt"]),
+                         ("list.txt", False, "Sony promos"))
+
+    def test_unknown_flags_are_rejected(self):
+        for flag in ("--force", "-y", "--group=Sony promos", "--Yes"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit) as raised:
+                canvas.parse_debloat_args(["list.txt", flag])
+            self.assertIn("Unknown option", raised.exception.code)
+
+    def test_group_needs_a_name_and_cannot_be_combined_with_yes(self):
+        for args in (["list.txt", "--group"], ["list.txt", "--group", "--yes"]):
+            with self.subTest(args=args), self.assertRaises(SystemExit) as raised:
+                canvas.parse_debloat_args(args)
+            self.assertIn("--group needs a group name", raised.exception.code)
+        with self.assertRaises(SystemExit) as raised:
+            canvas.parse_debloat_args(["list.txt", "--yes", "--group", "Sony promos"])
+        self.assertIn("not both", raised.exception.code)
+
+    def test_a_second_list_or_no_list_is_rejected(self):
+        for args in (["a.txt", "b.txt"], ["--yes"]):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                canvas.parse_debloat_args(args)
+
+
+class DebloatPromptTests(TvTestCase):
+    """debloat and undebloat show each group, ask, and touch the TV only for the groups answered yes."""
+
+    def setUp(self):
+        super().setUp()
+        self.list = os.path.join(os.path.dirname(canvas.BACKUPS), "device.txt")
+        os.makedirs(os.path.dirname(self.list), exist_ok=True)
+        with open(self.list, "w") as f:
+            f.write(DEVICE_LIST)
+
+    def disabled(self):
+        return [c.split()[-1] for c in self.tv.issued("pm disable-user")]
+
+    def test_y_applies_a_group_and_enter_or_n_skips_it(self):
+        ask = Answers("n", "y", "", "n")  # Other: no, Sony promos: yes, Google extras: Enter, Sony help apps: no
+        canvas.cmd_debloat([self.list], ask=ask)
+        self.assertEqual(self.disabled(), PROMOS)
+        self.assertEqual(ask.prompts, ["Disable this group? [y/N] "] * 4)
+
+    def test_yes_in_any_case_counts_and_anything_else_is_no(self):
+        canvas.cmd_debloat([self.list], ask=Answers("YES", "  Y ", "maybe", "no"))
+        self.assertEqual(self.disabled(), LOOSE + PROMOS)
+
+    def test_pressing_enter_on_every_group_leaves_the_tv_alone(self):
+        canvas.cmd_debloat([self.list], ask=Answers("", "", "", ""))
+        self.assertEqual(self.tv.commands, [])
+        self.assertIn("The TV was not touched", self.stdout.getvalue())
+
+    def test_each_group_is_shown_with_its_packages_and_what_they_are_before_the_question(self):
+        canvas.cmd_debloat([self.list], ask=Answers("", "", "", ""))
+        shown = self.stdout.getvalue()
+        for text in ("Sony promos", "com.sony.dtv.promos", "Sony promotional content", "Google extras",
+                     "com.google.android.feedback", "Other", "com.loose.first"):
+            self.assertIn(text, shown)
+
+    def test_yes_applies_every_group_without_asking(self):
+        canvas.cmd_debloat([self.list, "--yes"], ask=never_asked)
+        self.assertEqual(self.disabled(), LOOSE + PROMOS + EXTRAS + HELP)
+
+    def test_group_applies_exactly_that_group_without_asking(self):
+        canvas.cmd_debloat([self.list, "--group", "Sony promos"], ask=never_asked)
+        self.assertEqual(self.disabled(), PROMOS)
+        self.assertEqual(self.tv.issued("pm enable"), [])
+
+    def test_group_matches_the_name_whatever_the_case(self):
+        canvas.cmd_debloat([self.list, "--group", "google EXTRAS"], ask=never_asked)
+        self.assertEqual(self.disabled(), EXTRAS)
+
+    def test_an_unknown_group_stops_before_the_tv_is_touched(self):
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_debloat([self.list, "--group", "Sony"], ask=never_asked)
+        self.assertIn("No group named 'Sony'", raised.exception.code)
+        self.assertEqual(self.tv.commands, [])
+
+    def test_an_unknown_flag_stops_before_the_list_is_read_or_the_tv_is_touched(self):
+        with self.assertRaises(SystemExit):
+            canvas.cmd_debloat([self.list, "--force"], ask=never_asked)
+        self.assertEqual(self.tv.commands, [])
+
+    def test_no_input_to_read_skips_everything_and_says_how_to_apply_without_asking(self):
+        canvas.cmd_debloat([self.list], ask=Answers())  # EOF on the first question
+        self.assertEqual(self.tv.commands, [])
+        self.assertIn("--yes", self.stdout.getvalue())
+
+    def test_no_input_after_some_answers_keeps_the_answers_given(self):
+        canvas.cmd_debloat([self.list], ask=Answers("n", "y"))  # then end of input
+        self.assertEqual(self.disabled(), PROMOS)
+
+    def test_undebloat_asks_to_re_enable_and_enables_only_the_groups_answered_yes(self):
+        for pkg in LOOSE + PROMOS + EXTRAS + HELP:
+            self.tv.packages[pkg] = False
+        ask = Answers("n", "", "y", "n")
+        canvas.cmd_debloat([self.list], enable=True, ask=ask)
+        self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {pkg}" for pkg in EXTRAS])
+        self.assertEqual(self.tv.issued("pm disable"), [])
+        self.assertEqual(ask.prompts, ["Re-enable this group? [y/N] "] * 4)
+        self.assertEqual([pkg for pkg, enabled in self.tv.packages.items() if enabled and pkg not in canvas.STOCK_HOMES],
+                         EXTRAS)
+
+    def test_undebloat_group_and_yes(self):
+        canvas.cmd_debloat([self.list, "--group", "Sony help apps"], enable=True, ask=never_asked)
+        self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {pkg}" for pkg in HELP])
+        canvas.cmd_debloat([self.list, "--yes"], enable=True, ask=never_asked)
+        self.assertEqual(len(self.tv.issued("pm enable")), len(HELP) + len(LOOSE + PROMOS + EXTRAS + HELP))
+
+    def test_every_pm_call_is_its_own_shell_call(self):
+        canvas.cmd_debloat([self.list, "--yes"], ask=never_asked)
+        canvas.cmd_debloat([self.list, "--yes"], enable=True, ask=never_asked)
+        self.assertEqual(len(self.tv.commands), 2 * len(LOOSE + PROMOS + EXTRAS + HELP))
+        for command in self.tv.commands:
+            self.assertRegex(command, r"^pm (disable-user --user 0|enable) [A-Za-z0-9_.]+$")
+
+    def test_the_connection_is_closed_afterwards(self):
+        canvas.cmd_debloat([self.list, "--group", "Sony promos"], ask=never_asked)
+        self.assertTrue(self.tv.closed)
+
+    def test_the_closing_line_names_what_was_done_and_what_was_left_alone(self):
+        canvas.cmd_debloat([self.list, "--group", "Sony promos"], ask=never_asked)
+        self.assertIn("Disabled: Sony promos. Left alone: Other, Google extras, Sony help apps.", self.stdout.getvalue())
+
+    def test_main_routes_debloat_and_undebloat_and_asks_through_input(self):
+        with mock.patch.object(sys, "argv", ["canvas.py", "debloat", self.list]), \
+                mock.patch("builtins.input", side_effect=["n", "y", "n", "n"]) as typed:
+            canvas.main()
+        self.assertEqual(self.disabled(), PROMOS)
+        self.assertEqual(typed.call_count, 4)
+        with mock.patch.object(sys, "argv", ["canvas.py", "undebloat", self.list, "--group", "Sony promos"]):
+            canvas.main()
+        self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {pkg}" for pkg in PROMOS])
+
+
 class SameComponentTests(unittest.TestCase):
     def test_short_and_full_class_names_match(self):
         self.assertTrue(canvas.same_component(canvas.HOME, canvas.PKG + "/" + canvas.PKG + ".home.HomeActivity"))
