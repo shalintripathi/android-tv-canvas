@@ -14,6 +14,7 @@
 
 The TV address comes from $TV_HOST or tools/.tv_host (written by `find`).
 """
+import contextlib
 import datetime
 import errno
 import hashlib
@@ -72,27 +73,54 @@ TcpTransport.bulk_write = _send_all
 
 
 class NcRelay:
-    """macOS blocks LAN access for non-Apple binaries. Apple's nc is allowed, so pipe ADB through it."""
+    """macOS blocks LAN access for non-Apple binaries. Apple's nc is allowed, so pipe ADB through it.
+
+    Every `nc` child is killed and reaped when its client closes or when close() is called, so no
+    child outlives the command (nc keeps running after stdin EOF while the TV holds the socket open)."""
 
     def __init__(self, host, port):
         self.host, self.port = host, port
+        self._closed = False
+        self._lock = threading.Lock()
+        self._conns = []  # (client socket, nc process, [relay threads])
         self.server = socket.socket()
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind(("127.0.0.1", 0))
         self.server.listen(4)
+        self.server.settimeout(0.2)  # lets close() stop the accept loop; closing from another thread may not wake accept()
         self.local_port = self.server.getsockname()[1]
-        threading.Thread(target=self._accept, daemon=True).start()
+        self._acceptor = threading.Thread(target=self._accept, daemon=True)
+        self._acceptor.start()
 
     def _accept(self):
-        while True:
+        while not self._closed:
             try:
                 client, _ = self.server.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 return
             proc = subprocess.Popen(["/usr/bin/nc", self.host, str(self.port)],
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
-            threading.Thread(target=self._to_tv, args=(client, proc), daemon=True).start()
-            threading.Thread(target=self._from_tv, args=(client, proc), daemon=True).start()
+            threads = [threading.Thread(target=self._to_tv, args=(client, proc), daemon=True),
+                       threading.Thread(target=self._from_tv, args=(client, proc), daemon=True)]
+            with self._lock:
+                if self._closed:
+                    self._reap(client, proc)
+                    return
+                self._conns.append((client, proc, threads))
+            for thread in threads:
+                thread.start()
+
+    @staticmethod
+    def _reap(client, proc):
+        """Stop one connection: wake the relay threads, kill nc and wait for it."""
+        try:
+            client.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        proc.kill()
+        proc.wait()
 
     @staticmethod
     def _to_tv(client, proc):
@@ -102,12 +130,13 @@ class NcRelay:
                 if not data:
                     break
                 proc.stdin.write(data)
-        except OSError:
+        except (OSError, ValueError):
             pass
         finally:
+            NcRelay._reap(client, proc)  # the client is gone: nothing left to relay, and nc would wait on the TV forever
             try:
                 proc.stdin.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
 
     @staticmethod
@@ -118,11 +147,29 @@ class NcRelay:
                 if not data:
                     break
                 client.sendall(data)
-        except OSError:
+        except (OSError, ValueError):
             pass
         finally:
+            NcRelay._reap(client, proc)
             client.close()
-            proc.kill()
+            try:
+                proc.stdout.close()
+            except (OSError, ValueError):
+                pass
+
+    def close(self):
+        """Close the listener and kill and reap every nc child. Safe to call twice."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            conns = list(self._conns)
+        self._acceptor.join(2)
+        self.server.close()
+        for client, proc, threads in conns:
+            self._reap(client, proc)
+            for thread in threads:
+                thread.join(2)
 
 
 def tv_host():
@@ -144,7 +191,14 @@ def signer():
 
 def _connect(host, port):
     dev = AdbDeviceTcp(host, port, default_transport_timeout_s=60.0)
-    dev.connect(rsa_keys=[signer()], auth_timeout_s=120)
+    try:
+        dev.connect(rsa_keys=[signer()], auth_timeout_s=120)
+    except BaseException:
+        try:
+            dev.close()
+        except Exception:
+            pass
+        raise
     return dev
 
 
@@ -157,7 +211,34 @@ def connect():
         if platform.system() != "Darwin" or e.errno not in (errno.EHOSTUNREACH, errno.ENETUNREACH):
             raise
     relay = NcRelay(host, port)
-    return _connect("127.0.0.1", relay.local_port)
+    try:
+        dev = _connect("127.0.0.1", relay.local_port)
+    except BaseException:
+        relay.close()
+        raise
+    dev.canvas_relay = relay
+    return dev
+
+
+def disconnect(dev):
+    """Close the device and, when ADB goes through the nc relay, the relay and its nc children."""
+    try:
+        dev.close()
+    except Exception:
+        pass
+    relay = getattr(dev, "canvas_relay", None)
+    if relay is not None:
+        relay.close()
+
+
+@contextlib.contextmanager
+def tv():
+    """Every command talks to the TV inside `with tv() as dev:` so the connection is always closed."""
+    dev = connect()
+    try:
+        yield dev
+    finally:
+        disconnect(dev)
 
 
 def sh(dev, command):
@@ -229,20 +310,20 @@ def mdns_names():
 
 
 def cmd_probe():
-    dev = connect()
-    for prop in ("ro.product.manufacturer", "ro.product.model", "ro.build.version.release",
-                 "ro.build.version.sdk", "ro.build.display.id"):
-        print(f"{prop} = {sh(dev, f'getprop {prop}')}")
-    print("home = " + current_home(dev))
-    print("screensaver = " + sh(dev, "settings get secure screensaver_components"))
+    with tv() as dev:
+        for prop in ("ro.product.manufacturer", "ro.product.model", "ro.build.version.release",
+                     "ro.build.version.sdk", "ro.build.display.id"):
+            print(f"{prop} = {sh(dev, f'getprop {prop}')}")
+        print("home = " + current_home(dev))
+        print("screensaver = " + sh(dev, "settings get secure screensaver_components"))
 
 
 def cmd_shot(path):
-    dev = connect()
-    sh(dev, "screencap -p /sdcard/_canvas_shot.png")
-    dev.pull("/sdcard/_canvas_shot.png", path)
-    sh(dev, "rm /sdcard/_canvas_shot.png")
-    print(f"saved {path}")
+    with tv() as dev:
+        sh(dev, "screencap -p /sdcard/_canvas_shot.png")
+        dev.pull("/sdcard/_canvas_shot.png", path)
+        sh(dev, "rm /sdcard/_canvas_shot.png")
+        print(f"saved {path}")
 
 
 def current_home(dev):
@@ -263,23 +344,51 @@ def backup_path(dev):
     return os.path.join(BACKUPS, sh(dev, "settings get secure android_id") + ".json")
 
 
+def same_component(a, b):
+    """`pkg/.Cls` and `pkg/pkg.Cls` name the same activity."""
+    def full(component):
+        pkg, _, cls = component.strip().partition("/")
+        return f"{pkg}/{pkg + cls if cls.startswith('.') else cls}" if cls else pkg
+    return full(a) == full(b)
+
+
+def save_backup(path, data):
+    """Write the backup to disk before the caller goes on (temp file + rename, so it is never half-written)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def take_backup(dev):
     """Back up once per TV. Re-installs keep the first backup so `restore` returns to the stock setup."""
     path = backup_path(dev)
     if os.path.exists(path):
         print(f"Keeping the existing backup {os.path.relpath(path, ROOT)}")
         return path
+    home = current_home(dev)
+    dream = sh(dev, "settings get secure screensaver_components")
+    if PKG in home or PKG in dream:
+        sys.exit(f"Refusing to back up: this TV already uses Canvas (home: {home or 'none'}, screensaver: {dream}), "
+                 "so these are not its stock settings and `restore` would keep Canvas.\n"
+                 "Put the stock home screen and screensaver back first (for example "
+                 "`tools/canvas sh pm enable com.google.android.apps.tv.launcherx`), then run install again.")
+    if "/" not in home or "ResolverActivity" in home:
+        sys.exit(f"Refusing to back up: the TV reports no usable home screen (home: {home or 'none'}). "
+                 "It may be showing a chooser or have no launcher enabled. "
+                 "Pick a home screen on the TV first, then run install again.")
     data = {
         "taken": datetime.datetime.now().isoformat(timespec="seconds"),
         "model": sh(dev, "getprop ro.product.model"),
-        "home": current_home(dev),
+        "home": home,
         "secure": {k: sh(dev, f"settings get secure {k}") for k in SECURE_KEYS},
         "system": {k: sh(dev, f"settings get system {k}") for k in SYSTEM_KEYS},
         "disabled_by_canvas": [],
     }
-    os.makedirs(BACKUPS, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    save_backup(path, data)
     print(f"Backed up the TV's settings to {os.path.relpath(path, ROOT)}")
     return path
 
@@ -296,66 +405,96 @@ def default_apk():
 def cmd_install(args):
     apk = next((a for a in args if not a.startswith("--")), None) or default_apk()
     app_only = "--app-only" in args
-    dev = connect()
-    path = take_backup(dev)
-    print(f"Uploading {os.path.relpath(apk, ROOT)}…")
-    push(dev, apk, "/data/local/tmp/canvas.apk")
-    out = run(dev, "pm install -r -g /data/local/tmp/canvas.apk")
-    sh(dev, "rm -f /data/local/tmp/canvas.apk")
-    if "Success" not in out:
-        hint = (f"\nThe installed copy was signed with a different key. Remove it first:"
-                f" tools/canvas sh pm uninstall {PKG}") if "UPDATE_INCOMPATIBLE" in out else ""
-        sys.exit("Install failed." + hint)
-    run(dev, f"pm grant {PKG} android.permission.WRITE_SECURE_SETTINGS")
-    run(dev, f"appops set {PKG} WRITE_SETTINGS allow")
-    if app_only:
-        print("Installed (app only).")
-        return
+    with tv() as dev:
+        path = take_backup(dev)
+        print(f"Uploading {os.path.relpath(apk, ROOT)}…")
+        push(dev, apk, "/data/local/tmp/canvas.apk")
+        out = run(dev, "pm install -r -g /data/local/tmp/canvas.apk")
+        sh(dev, "rm -f /data/local/tmp/canvas.apk")
+        if "Success" not in out:
+            hint = (f"\nThe installed copy was signed with a different key. Remove it first:"
+                    f" tools/canvas sh pm uninstall {PKG}") if "UPDATE_INCOMPATIBLE" in out else ""
+            sys.exit("Install failed." + hint)
+        grant = run(dev, f"pm grant {PKG} android.permission.WRITE_SECURE_SETTINGS")
+        if grant and not app_only:  # a successful grant prints nothing
+            sys.exit("Canvas could not be granted WRITE_SECURE_SETTINGS, so it cannot set the screensaver. "
+                     "The app is installed, but the home screen and screensaver were not changed.")
+        run(dev, f"appops set {PKG} WRITE_SETTINGS allow")
+        if app_only:
+            print("Installed (app only).")
+            return
 
-    with open(path) as f:
-        backup = json.load(f)
-    run(dev, f"cmd package set-home-activity --user 0 {HOME}")
-    for pkg in STOCK_HOMES:
-        if installed(dev, pkg) and enabled(dev, pkg):
-            run(dev, f"pm disable-user --user 0 {pkg}")
-            if pkg not in backup["disabled_by_canvas"]:
-                backup["disabled_by_canvas"].append(pkg)
-    with open(path, "w") as f:
-        json.dump(backup, f, indent=2)
-    run(dev, f"cmd package set-home-activity --user 0 {HOME}")
-    run(dev, f"settings put secure screensaver_components {DREAM}")
-    run(dev, "settings put secure screensaver_enabled 1")
-    run(dev, "settings put secure screensaver_activate_on_sleep 1")
-    # A stale home task from the old launcher can open Canvas behind the current app.
-    run(dev, "am force-stop com.android.tv.settings")
-    run(dev, "input keyevent KEYCODE_HOME")
+        with open(path) as f:
+            backup = json.load(f)
+        run(dev, f"cmd package set-home-activity --user 0 {HOME}")
+        home = current_home(dev)
+        if not same_component(home, HOME):
+            sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}). "
+                     "The stock launchers were left enabled and nothing else was changed.")
+        for pkg in STOCK_HOMES:
+            if installed(dev, pkg) and enabled(dev, pkg):
+                if pkg not in backup["disabled_by_canvas"]:
+                    backup["disabled_by_canvas"].append(pkg)
+                save_backup(path, backup)  # on disk before the disable, so a failure part-way can still be undone
+                run(dev, f"pm disable-user --user 0 {pkg}")
+        run(dev, f"cmd package set-home-activity --user 0 {HOME}")
+        run(dev, f"settings put secure screensaver_components {DREAM}")
+        run(dev, "settings put secure screensaver_enabled 1")
+        run(dev, "settings put secure screensaver_activate_on_sleep 1")
+        # A stale home task from the old launcher can open Canvas behind the current app.
+        run(dev, "am force-stop com.android.tv.settings")
+        run(dev, "input keyevent KEYCODE_HOME")
     time.sleep(3)
-    dev.close()
     os.makedirs(SHOTS, exist_ok=True)
     cmd_shot(os.path.join(SHOTS, "install-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".png"))
     print("Installed. Press Home on the remote.")
 
 
-def cmd_restore(args):
-    dev = connect()
-    path = backup_path(dev)
-    if not os.path.exists(path):
-        sys.exit("No backup for this TV in tools/backups/.")
-    with open(path) as f:
-        backup = json.load(f)
-    for pkg in backup["disabled_by_canvas"]:
-        run(dev, f"pm enable {pkg}")
+def check_restored(dev, backup, packages):
+    """Read the TV back and list everything that is not as the backup says."""
+    problems = []
+    want = backup.get("home", "")
+    got = current_home(dev)
+    if not same_component(got, want):
+        problems.append(f"the home screen is {got or 'nothing'}, the backup says {want or 'nothing'}")
+    for pkg in packages:
+        if not enabled(dev, pkg):
+            problems.append(f"{pkg} is still disabled")
     for table, values in (("secure", backup["secure"]), ("system", backup["system"])):
         for key, value in values.items():
-            run(dev, f"settings delete {table} {key}" if value in ("", "null")
-                else f"settings put {table} {key} {value}")
-    home = backup.get("home", "")
-    if "/" in home and not home.startswith(PKG):
-        run(dev, f"cmd package set-home-activity --user 0 {home}")
-    if "--uninstall" in args:
-        run(dev, f"pm uninstall {PKG}")
-    run(dev, "input keyevent KEYCODE_HOME")
-    print("Restored the TV's previous home screen and screensaver.")
+            got = sh(dev, f"settings get {table} {key}")
+            unset = value in ("", "null")
+            if (got not in ("", "null")) if unset else (got != value):
+                problems.append(f"{table} {key} is {got!r}, the backup says {value!r}")
+    return problems
+
+
+def cmd_restore(args):
+    with tv() as dev:
+        path = backup_path(dev)
+        if not os.path.exists(path):
+            sys.exit("No backup for this TV in tools/backups/.")
+        with open(path) as f:
+            backup = json.load(f)
+        # Also re-enable any installed stock home, in case an install stopped before it recorded the change.
+        packages = list(dict.fromkeys(backup["disabled_by_canvas"] + [p for p in STOCK_HOMES if installed(dev, p)]))
+        for pkg in packages:
+            run(dev, f"pm enable {pkg}")
+        for table, values in (("secure", backup["secure"]), ("system", backup["system"])):
+            for key, value in values.items():
+                run(dev, f"settings delete {table} {key}" if value in ("", "null")
+                    else f"settings put {table} {key} {value}")
+        home = backup.get("home", "")
+        if "/" in home and not home.startswith(PKG):
+            run(dev, f"cmd package set-home-activity --user 0 {home}")
+        if "--uninstall" in args:
+            run(dev, f"pm uninstall {PKG}")
+        problems = check_restored(dev, backup, packages)
+        if problems:
+            sys.exit("Restore did not take effect on the TV:\n  - " + "\n  - ".join(problems)
+                     + "\nThe backup is still in tools/backups/. Run restore again, or fix these on the TV.")
+        run(dev, "input keyevent KEYCODE_HOME")
+        print("Restored the TV's previous home screen and screensaver.")
 
 
 def read_list(path):
@@ -364,9 +503,9 @@ def read_list(path):
 
 
 def cmd_debloat(path, enable=False):
-    dev = connect()
-    for pkg in read_list(path):
-        run(dev, f"pm enable {pkg}" if enable else f"pm disable-user --user 0 {pkg}")
+    with tv() as dev:
+        for pkg in read_list(path):
+            run(dev, f"pm enable {pkg}" if enable else f"pm disable-user --user 0 {pkg}")
 
 
 def main():
@@ -377,7 +516,8 @@ def main():
     elif command == "probe":
         cmd_probe()
     elif command == "sh" and len(args) > 1:
-        print(sh(connect(), " ".join(args[1:])))
+        with tv() as dev:
+            print(sh(dev, " ".join(args[1:])))
     elif command == "shot" and len(args) > 1:
         cmd_shot(args[1])
     elif command == "install":
