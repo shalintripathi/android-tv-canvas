@@ -180,7 +180,10 @@ document.querySelectorAll("nav button").forEach((b) => {
     document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
     document.querySelectorAll("main section").forEach((s) => s.classList.toggle("on", s.id === b.dataset.tab));
     if (b.dataset.tab === "frame") loadSettings().catch((e) => toast(e.message));
-    if (b.dataset.tab === "home") loadApps().catch((e) => toast(e.message));
+    if (b.dataset.tab === "home") {
+      loadSettings().catch((e) => toast(e.message)); // the wallpaper choice lives in the settings
+      loadApps().catch((e) => toast(e.message));
+    }
     if (b.dataset.tab === "phones") loadPhones().catch((e) => toast(e.message));
   };
 });
