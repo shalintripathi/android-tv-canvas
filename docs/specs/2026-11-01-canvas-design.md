@@ -31,7 +31,7 @@ Researched in November 2026; sources are in the conversation's research briefs.
 | On Google TV the only reliable way to replace Home is to disable `com.google.android.apps.tv.launcherx` and `com.google.android.tungsten.setupwraith`. Google updates have broken other override tricks. | Home mode does that, reversibly. The screensaver and the app must work even if Home is lost. |
 | macOS Local Network privacy blocks non-Apple binaries (Homebrew Python, `adb`) from reaching LAN hosts; Apple's `nc` is allowed. | The tooling relays ADB through `nc` on localhost when a direct connection fails. |
 
-Test TV (the test TV): Sony BRAVIA (BF1, MediaTek mt5896), Android 12 / API 31, Google TV, 2.4 GB
+The test TV: Sony BRAVIA (BF1, MediaTek mt5896), Android 12 / API 31, Google TV, 2.4 GB
 RAM (~970 MB free), UI 1920×1080 at density 320 (960×540 dp). Stock home
 `com.google.android.apps.tv.launcherx` (88 MB PSS idle). Stock screensaver
 `com.google.android.apps.tv.dreamx/.service.Backdrop`, `screen_off_timeout` 600000 ms,

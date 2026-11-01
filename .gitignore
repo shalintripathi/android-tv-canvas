@@ -14,5 +14,6 @@ tools/.tv_host
 tools/backups/
 *.jks
 *.keystore
+!app/debug.keystore
 __pycache__/
 shots/
