@@ -53,6 +53,7 @@ class SlideshowView(context: Context, private val config: Config) : FrameLayout(
     private val overlay: OverlayView? = if (config.overlay) OverlayView(context, config.showClock) else null
     private var front: FrameLayout? = null
     private var running = false
+    @Volatile
     private var generation = 0
     private var shownAt = 0L
     private val advance = Runnable { show(planner.next()) }
@@ -67,6 +68,8 @@ class SlideshowView(context: Context, private val config: Config) : FrameLayout(
     fun start() {
         if (running) return
         running = true
+        // The library may have changed while stopped (a phone upload, a delete), and nobody was listening.
+        reloadPhotos()
         app.library.addListener(onLibraryChanged)
         overlay?.start()
         if (front == null) show(planner.next()) else schedule(config.holdMs - (SystemClock.elapsedRealtime() - shownAt))
@@ -120,6 +123,8 @@ class SlideshowView(context: Context, private val config: Config) : FrameLayout(
         val h = if (height > 0) height else resources.displayMetrics.heightPixels
         try {
             decoder.execute {
+                // A newer slide was asked for while this one waited its turn: skip the decode.
+                if (gen != generation) return@execute
                 val decoded = decode(slide, w, h)
                 main.post {
                     if (gen != generation || !running) return@post
@@ -156,6 +161,9 @@ class SlideshowView(context: Context, private val config: Config) : FrameLayout(
         }
     } catch (e: OutOfMemoryError) {
         null
+    } catch (e: Exception) {
+        // Nothing may escape on the decoder thread: it would kill the process, and the screensaver with it.
+        null
     }
 
     private fun layerFor(d: Decoded): FrameLayout {
@@ -188,6 +196,18 @@ class SlideshowView(context: Context, private val config: Config) : FrameLayout(
 
     private fun crossfadeTo(layer: FrameLayout, gentle: Boolean) {
         val old = front
+        if (old != null) {
+            // Skipped through quickly: the previous fade is unfinished and older layers still sit under it.
+            // Settle it now so at most two photo layers (this one and the one it fades over) are ever attached.
+            if (old.alpha < 1f) {
+                old.animate().cancel()
+                old.alpha = 1f
+            }
+            for (i in childCount - 1 downTo 0) {
+                val child = getChildAt(i)
+                if (child !== old && child !== overlay && child is FrameLayout) removeLayer(child)
+            }
+        }
         addView(layer, overlay?.let { indexOfChild(it) } ?: childCount, LayoutParams(MATCH, MATCH))
         front = layer
         layer.alpha = 0f
