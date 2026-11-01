@@ -25,6 +25,9 @@ class PhotoLibrary(private val context: Context) {
 
     class UnsupportedImageException(message: String) : Exception(message)
 
+    /** The TV's own storage refused a write (full, or failing). Not the phone's fault, unlike an IOException. */
+    class StorageException(cause: IOException) : Exception(cause.message, cause)
+
     private val photos = File(context.filesDir, "photos").apply { mkdirs() }
     private val thumbs = File(context.filesDir, "thumbs").apply { mkdirs() }
     private val index = File(context.filesDir, "library.json")
@@ -51,16 +54,42 @@ class PhotoLibrary(private val context: Context) {
         listeners.remove(listener)
     }
 
-    /** Stores one uploaded image. A body shorter than [length] means the upload broke off. */
+    /**
+     * Stores one uploaded image. A body that fails or is shorter than [length] means the upload broke off
+     * (IOException); a temp file, photo or index the TV cannot write is a [StorageException].
+     */
     fun add(body: InputStream, length: Long, takenAtHint: Long?): PhotoEntry {
-        val upload = File.createTempFile("upload", ".tmp", context.cacheDir)
+        val upload = storage { File.createTempFile("upload", ".tmp", context.cacheDir) }
         try {
-            val copied = upload.outputStream().use { body.copyTo(it) }
+            val copied = receive(body, upload)
             if (copied != length) throw IOException("Upload interrupted")
             // One import at a time: each one briefly holds a few full-size bitmaps.
             return synchronized(importLock) { import(upload, takenAtHint) }
         } finally {
             upload.delete()
+        }
+    }
+
+    /** Copies the body into [target], keeping the phone's read failures apart from the TV's write failures. */
+    private fun receive(body: InputStream, target: File): Long {
+        val out = storage { FileOutputStream(target) }
+        try {
+            val buffer = ByteArray(COPY_BUFFER)
+            var total = 0L
+            while (true) {
+                val n = body.read(buffer) // an IOException here: the phone stopped sending
+                if (n < 0) break
+                storage { out.write(buffer, 0, n) }
+                total += n
+            }
+            storage { out.close() }
+            return total
+        } finally {
+            try {
+                out.close() // only does something after a failure above
+            } catch (e: IOException) {
+                // Already failing; the caller deletes the file.
+            }
         }
     }
 
@@ -171,13 +200,17 @@ class PhotoLibrary(private val context: Context) {
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, true)
     }
 
+    /** Writes via a temp file, synced to disk before the rename, so a power cut never leaves half a photo. */
     private fun writeJpeg(bitmap: Bitmap, target: File, quality: Int) {
         val tmp = File(target.parentFile, target.name + ".tmp")
         try {
-            FileOutputStream(tmp).use {
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it)) throw IOException("JPEG encode failed")
+            storage {
+                FileOutputStream(tmp).use {
+                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it)) throw IOException("JPEG encode failed")
+                    it.fd.sync()
+                }
+                if (!tmp.renameTo(target)) throw IOException("Could not save photo")
             }
-            if (!tmp.renameTo(target)) throw IOException("Could not save photo")
         } finally {
             // Gone already after a successful rename; otherwise don't leave a stray .tmp.
             tmp.delete()
@@ -199,10 +232,17 @@ class PhotoLibrary(private val context: Context) {
         synchronized(this) {
             // Write first: if it throws, memory still matches the index on disk and no listener is told.
             val next = change(entries)
-            index.writeAtomically(LibraryJson.encode(next))
+            storage { index.writeAtomically(LibraryJson.encode(next)) }
             entries = next
         }
         main.post { listeners.forEach { it() } }
+    }
+
+    /** Runs a write to the TV's own storage: an IOException from it becomes a [StorageException]. */
+    private inline fun <T> storage(write: () -> T): T = try {
+        write()
+    } catch (e: IOException) {
+        throw StorageException(e)
     }
 
     private fun load(): List<PhotoEntry> =
@@ -211,6 +251,7 @@ class PhotoLibrary(private val context: Context) {
     companion object {
         const val MAX_SIDE = 1920
         const val THUMB_SIDE = 320
+        private const val COPY_BUFFER = 64 * 1024
         private const val UNSUPPORTED = "This TV can't read that file. Try a JPEG or PNG photo."
         private const val TOO_LARGE = "This photo is too large for the TV to process. Try a smaller one."
     }

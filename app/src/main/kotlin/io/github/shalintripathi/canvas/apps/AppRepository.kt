@@ -83,11 +83,14 @@ class AppRepository(private val context: Context) {
         } catch (e: PackageManager.NameNotFoundException) {
             null
         }
-        val art = banner ?: try {
+        val shared = banner ?: try {
             pm.getActivityIcon(component)
         } catch (e: PackageManager.NameNotFoundException) {
             return null
         }
+        // This runs on the phone page's threads, and the package manager's drawables can share state with the ones
+        // the home screen is drawing: bound and draw a copy of our own.
+        val art = shared.mutate()
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         if (banner != null) {

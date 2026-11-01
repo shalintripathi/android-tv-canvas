@@ -77,11 +77,17 @@ class ApiRouter(private val app: CanvasApp, private val pairing: Pairing) : Http
 
     private fun upload(r: HttpRequest): HttpResponse {
         if (r.contentLength <= 0) return HttpResponse.error(400, "Empty upload")
+        // Checked before the body is read: room for the upload and the photo made from it, and some to spare for the TV.
+        if (app.filesDir.usableSpace < r.contentLength * 2 + STORAGE_RESERVE) {
+            return HttpResponse.error(507, "The TV is running out of storage. Delete some photos first.")
+        }
         return try {
             val entry = app.library.add(r.body, r.contentLength, r.query["takenAt"]?.toLongOrNull())
             HttpResponse.json(LibraryJson.toJson(entry).toString(), 201)
         } catch (e: PhotoLibrary.UnsupportedImageException) {
             HttpResponse.error(415, e.message ?: "Unsupported image")
+        } catch (e: PhotoLibrary.StorageException) {
+            HttpResponse.error(500, "The TV couldn't save the photo.")
         } catch (e: IOException) {
             HttpResponse.error(400, "Upload interrupted")
         }
@@ -125,9 +131,9 @@ class ApiRouter(private val app: CanvasApp, private val pairing: Pairing) : Http
         if (s != null) {
             if (s.has("useCanvas")) {
                 val on = s.optBoolean("useCanvas")
-                prefs.useCanvasScreensaver = on
                 val applied = if (on) system.useCanvas() else system.restorePrevious(prefs)
                 if (!applied) return HttpResponse.error(409, "The TV didn't allow this change. Run tools/canvas install again.")
+                prefs.useCanvasScreensaver = on // only once the TV took it, so the page never shows a change that did not happen
             }
             if (s.has("startAfterMin")) {
                 val minutes = s.optInt("startAfterMin")
@@ -199,6 +205,7 @@ class ApiRouter(private val app: CanvasApp, private val pairing: Pairing) : Http
         const val COOKIE = "canvas_session"
         private const val OK = "{\"ok\":true}"
         private val CACHE = mapOf("Cache-Control" to "private, max-age=86400")
+        private const val STORAGE_RESERVE = 512L * 1024 * 1024
         private val START_AFTER = setOf(5, 10, 15, 30)
         private val TURN_OFF = setOf(15, 30, 60, 240, -1)
 
