@@ -65,6 +65,7 @@ class ApiRouter(private val app: CanvasApp, private val pairing: Pairing) : Http
             is Pairing.PinResult.Paired -> HttpResponse.json(OK, headers = mapOf("Set-Cookie" to cookie(result.session)))
             is Pairing.PinResult.Wrong -> HttpResponse.error(403, "Wrong code. ${result.attemptsLeft} tries left.")
             Pairing.PinResult.NoCode -> HttpResponse.error(410, "No active code. On the TV, open Phone to get a new one.")
+            Pairing.PinResult.Locked -> HttpResponse.error(429, "Too many wrong codes. Wait a few minutes, or scan the QR code.")
         }
     }
 

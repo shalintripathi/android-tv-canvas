@@ -16,6 +16,9 @@ interface PhoneStore {
 /**
  * Pairing for the phone page. The TV shows a QR code (carrying [Code.token]) and a PIN for typing
  * by hand. Either one, while fresh, turns into a long-lived session cookie for that phone.
+ *
+ * Wrong PINs are also counted across codes: opening Phone again for a fresh code does not reset
+ * that count, so a device on the network cannot guess its way through code after code.
  */
 class Pairing(
     private val store: PhoneStore,
@@ -28,10 +31,14 @@ class Pairing(
         data class Paired(val session: String) : PinResult()
         data class Wrong(val attemptsLeft: Int) : PinResult()
         object NoCode : PinResult()
+
+        /** Too many wrong PINs lately, whatever the code: no PIN is checked until they age out. */
+        object Locked : PinResult()
     }
 
     private var code: Code? = null
     private var wrongPins = 0
+    private val recentWrongPins = ArrayDeque<Long>() // when each wrong PIN came, oldest first, across codes
     private val phones: MutableList<Phone> = store.load().toMutableList()
 
     @Synchronized
@@ -54,14 +61,19 @@ class Pairing(
 
     @Synchronized
     fun pairWithPin(pin: String, label: String): PinResult {
+        val now = clock()
+        while (recentWrongPins.isNotEmpty() && now - recentWrongPins.first() >= LOCKOUT_WINDOW_MS) recentWrongPins.removeFirst()
+        if (recentWrongPins.size >= MAX_RECENT_WRONG_PINS) return PinResult.Locked
         val c = currentCode() ?: return PinResult.NoCode
         if (same(pin.trim(), c.pin)) return PinResult.Paired(addPhone(label))
+        recentWrongPins.addLast(now)
         wrongPins++
-        if (wrongPins >= MAX_WRONG_PINS) {
-            code = null
-            return PinResult.NoCode
+        if (wrongPins >= MAX_WRONG_PINS) code = null
+        return when {
+            recentWrongPins.size >= MAX_RECENT_WRONG_PINS -> PinResult.Locked
+            code == null -> PinResult.NoCode
+            else -> PinResult.Wrong(MAX_WRONG_PINS - wrongPins)
         }
-        return PinResult.Wrong(MAX_WRONG_PINS - wrongPins)
     }
 
     @Synchronized
@@ -97,6 +109,8 @@ class Pairing(
     companion object {
         const val CODE_TTL_MS = 10 * 60 * 1000L
         const val MAX_WRONG_PINS = 5
+        const val MAX_RECENT_WRONG_PINS = 10
+        const val LOCKOUT_WINDOW_MS = 10 * 60 * 1000L
         const val MAX_PHONES = 20
 
         fun sha256(s: String): String = hex(MessageDigest.getInstance("SHA-256").digest(s.toByteArray(Charsets.UTF_8)))

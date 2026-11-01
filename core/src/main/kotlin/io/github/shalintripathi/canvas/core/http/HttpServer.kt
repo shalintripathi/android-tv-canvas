@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit
  * One request per connection (Connection: close). Requests run on a small fixed pool behind a short
  * bounded queue; a connection that arrives when both are full is closed without a response.
  * [headTimeoutMs] bounds each read while the request line and headers arrive.
+ * With [lanOnly], clients outside the local network are closed as soon as they connect, and a request
+ * whose Host is not an IP address or localhost gets a 403 (see [LanGuard]).
  */
 class HttpServer(
     private val port: Int,
@@ -27,6 +29,7 @@ class HttpServer(
     private val handler: HttpHandler,
     private val threads: Int = 8,
     private val headTimeoutMs: Int = 10_000,
+    private val lanOnly: Boolean = false,
 ) {
     private var server: ServerSocket? = null
     private var pool: ExecutorService? = null
@@ -70,6 +73,10 @@ class HttpServer(
                 }
                 continue
             }
+            if (lanOnly && !LanGuard.isLanAddress(client.inetAddress)) {
+                closeQuietly(client)
+                continue
+            }
             try {
                 workers.execute { serve(client) }
             } catch (e: RejectedExecutionException) {
@@ -95,6 +102,11 @@ class HttpServer(
                 } else {
                     drain(it, input, SMALL_DRAIN, 1_000)
                 }
+                return
+            }
+            if (lanOnly && !LanGuard.isAllowedHost(request.header("host"))) {
+                respond(it, output, HttpResponse.error(403, "Open the address shown on the TV"))
+                drain(it, request.body, MAX_DRAIN, 2_000)
                 return
             }
             it.soTimeout = BODY_TIMEOUT_MS
@@ -169,6 +181,8 @@ class HttpServer(
                 .append("Content-Length: ").append(length).append("\r\n")
                 .append("Connection: close\r\n")
                 .append("X-Content-Type-Options: nosniff\r\n")
+                .append("X-Frame-Options: DENY\r\n")
+                .append("Content-Security-Policy: frame-ancestors 'none'\r\n")
             if (r.headers.keys.none { it.equals("Cache-Control", ignoreCase = true) }) head.append("Cache-Control: no-store\r\n")
             for ((name, value) in r.headers) head.append(name).append(": ").append(value).append("\r\n")
             head.append("\r\n")
@@ -190,8 +204,10 @@ class HttpServer(
             410 -> "Gone"
             413 -> "Payload Too Large"
             415 -> "Unsupported Media Type"
+            429 -> "Too Many Requests"
             431 -> "Request Header Fields Too Large"
             501 -> "Not Implemented"
+            507 -> "Insufficient Storage"
             else -> if (status >= 500) "Server Error" else "Status"
         }
     }

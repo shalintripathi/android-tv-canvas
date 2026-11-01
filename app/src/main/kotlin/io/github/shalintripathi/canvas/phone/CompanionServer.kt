@@ -9,7 +9,7 @@ import java.io.IOException
 /** The phone page: runs while Canvas's process is alive (home screen or screensaver showing). */
 class CompanionServer(app: CanvasApp) {
     val pairing = Pairing(FilePhoneStore(File(app.filesDir, "phones.json")))
-    private val server = HttpServer(PORT, MAX_UPLOAD, ApiRouter(app, pairing))
+    private val server = HttpServer(PORT, MAX_UPLOAD, ApiRouter(app, pairing), lanOnly = true)
 
     @Volatile
     var error: String? = null

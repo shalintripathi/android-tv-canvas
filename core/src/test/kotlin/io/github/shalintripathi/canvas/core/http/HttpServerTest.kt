@@ -2,17 +2,21 @@ package io.github.shalintripathi.canvas.core.http
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.net.HttpURLConnection
 import java.net.Socket
 import java.net.URL
+import java.util.concurrent.CopyOnWriteArrayList
 
 class HttpServerTest {
     private lateinit var server: HttpServer
+    private val handled = CopyOnWriteArrayList<String>() // paths the handler saw, written on server threads
 
     private fun routes() = HttpHandler { r ->
+        handled.add(r.path)
         when {
             r.path == "/hello" -> HttpResponse.json("{\"name\":${HttpResponse.quote(r.query["name"].orEmpty())}}")
             r.method == "PUT" -> HttpResponse.json("{\"length\":${r.bodyText().length}}", 201)
@@ -89,6 +93,68 @@ class HttpServerTest {
             idle.forEach { it.close() }
             slow.stop()
         }
+    }
+
+    @Test
+    fun everyResponseRefusesToBeFramed() {
+        for (path in listOf("/hello?name=x", "/nope", "/boom")) {
+            val c = open(path)
+            c.responseCode
+            assertEquals(path, "DENY", c.getHeaderField("X-Frame-Options"))
+            assertEquals(path, "frame-ancestors 'none'", c.getHeaderField("Content-Security-Policy"))
+        }
+    }
+
+    /** Sends [head] (and [body]) on a raw socket, as a browser that was sent to the TV under another name would. */
+    private fun exchange(port: Int, head: String, body: String = ""): String =
+        Socket("127.0.0.1", port).use { s ->
+            s.soTimeout = 5_000
+            s.getOutputStream().apply {
+                write((head + "\r\n" + body).toByteArray(Charsets.ISO_8859_1))
+                flush()
+            }
+            s.getInputStream().readBytes().toString(Charsets.ISO_8859_1)
+        }
+
+    private fun lanOnlyServer() = HttpServer(0, 1024, routes(), lanOnly = true).also {
+        it.start()
+        server.stop()
+        server = it
+    }
+
+    @Test
+    fun aLanOnlyServerRefusesARequestThatNamesTheTvByAHostName() {
+        val lan = lanOnlyServer()
+        val reply = exchange(lan.localPort, "GET /hello?name=x HTTP/1.1\r\nHost: evil.example\r\n")
+        assertTrue(reply, reply.startsWith("HTTP/1.1 403 Forbidden\r\n"))
+        assertTrue(reply, reply.endsWith("{\"error\":\"Open the address shown on the TV\"}"))
+        assertTrue(reply, "X-Frame-Options: DENY\r\n" in reply)
+        assertTrue(handled.isEmpty())
+    }
+
+    @Test
+    fun aLanOnlyServerRefusesARequestWithoutAHostAndDrainsItsBody() {
+        val lan = lanOnlyServer()
+        val reply = exchange(lan.localPort, "PUT /upload HTTP/1.1\r\nContent-Length: 6\r\n", "abcdef")
+        assertTrue(reply, reply.startsWith("HTTP/1.1 403"))
+        assertTrue(handled.isEmpty())
+    }
+
+    @Test
+    fun aLanOnlyServerAnswersLoopbackClientsThatUseAnIpAddressOrLocalhost() {
+        val lan = lanOnlyServer()
+        val c = URL("http://127.0.0.1:${lan.localPort}/hello?name=x").openConnection() as HttpURLConnection
+        assertEquals(200, c.responseCode)
+        val reply = exchange(lan.localPort, "GET /hello?name=y HTTP/1.1\r\nHost: localhost:${lan.localPort}\r\n")
+        assertTrue(reply, reply.startsWith("HTTP/1.1 200"))
+        assertEquals(listOf("/hello", "/hello"), handled)
+    }
+
+    @Test
+    fun withoutLanOnlyAnyHostIsServed() {
+        val reply = exchange(server.localPort, "GET /hello?name=x HTTP/1.1\r\nHost: evil.example\r\n")
+        assertTrue(reply, reply.startsWith("HTTP/1.1 200"))
+        assertFalse(handled.isEmpty())
     }
 
     @Test

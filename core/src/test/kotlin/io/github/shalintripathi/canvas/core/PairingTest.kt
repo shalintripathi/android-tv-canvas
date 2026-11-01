@@ -57,6 +57,54 @@ class PairingTest {
     }
 
     @Test
+    fun wrongPinsCountAcrossCodesAndLockEvenTheRightPinOut() {
+        pairing.newCode()
+        repeat(Pairing.MAX_WRONG_PINS) { pairing.pairWithPin("x", "x") }
+        pairing.newCode() // a fresh code does not reset the count
+        repeat(Pairing.MAX_WRONG_PINS - 1) { pairing.pairWithPin("x", "x") }
+        assertEquals(Pairing.PinResult.Locked, pairing.pairWithPin("x", "x")) // the tenth
+        val next = pairing.newCode()
+        assertEquals(Pairing.PinResult.Locked, pairing.pairWithPin(next.pin, "x"))
+        assertTrue(pairing.phones().isEmpty())
+    }
+
+    @Test
+    fun theLockLiftsOnceTheWrongPinsAreOlderThanTheWindow() {
+        lockOut()
+        now += Pairing.LOCKOUT_WINDOW_MS - 1
+        assertEquals(Pairing.PinResult.Locked, pairing.pairWithPin(pairing.newCode().pin, "x"))
+        now += 1
+        val code = pairing.newCode()
+        assertTrue(pairing.pairWithPin(code.pin, "iPhone") is Pairing.PinResult.Paired)
+    }
+
+    @Test
+    fun onlyTheWrongPinsInTheLastTenMinutesCount() {
+        pairing.newCode()
+        repeat(Pairing.MAX_WRONG_PINS) { pairing.pairWithPin("x", "x") }
+        now += Pairing.LOCKOUT_WINDOW_MS
+        val code = pairing.newCode()
+        repeat(Pairing.MAX_WRONG_PINS - 1) { i ->
+            assertEquals(Pairing.PinResult.Wrong(Pairing.MAX_WRONG_PINS - 1 - i), pairing.pairWithPin("x", "x"))
+        }
+        assertTrue(pairing.pairWithPin(code.pin, "x") is Pairing.PinResult.Paired)
+    }
+
+    @Test
+    fun theQrTokenStillPairsWhilePinsAreLockedOut() {
+        lockOut()
+        val code = pairing.newCode()
+        assertEquals(Pairing.PinResult.Locked, pairing.pairWithPin(code.pin, "x"))
+        assertNotNull(pairing.pairWithToken(code.token, "iPhone"))
+    }
+
+    /** Two codes, each voided by five wrong PINs: ten wrong PINs in a row. */
+    private fun lockOut() = repeat(2) {
+        pairing.newCode()
+        repeat(Pairing.MAX_WRONG_PINS) { pairing.pairWithPin("x", "x") }
+    }
+
+    @Test
     fun theRightPinPairs() {
         val code = pairing.newCode()
         val result = pairing.pairWithPin(" ${code.pin} ", "iPhone")
