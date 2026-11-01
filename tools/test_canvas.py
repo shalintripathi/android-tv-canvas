@@ -149,6 +149,8 @@ class FakeTV:
             return "\n".join(lines)
         if command.startswith("settings get"):
             return self.settings.get((words[2], words[3]), "null")
+        if command == "pm list packages -d":
+            return "\n".join(f"package:{pkg}" for pkg, on in self.packages.items() if on is False)
         if command.startswith("pm list packages -d"):
             pkg = words[-1]
             return f"package:{pkg}" if self.packages.get(pkg) is False else ""
@@ -161,6 +163,8 @@ class FakeTV:
             return ""
         if command.startswith("pm grant"):
             return self.grant_output
+        if command.startswith("pm revoke"):
+            return ""
         if command.startswith("cmd package set-home-activity"):
             component = words[-1]
             package = component.split("/")[0]
@@ -254,7 +258,7 @@ class BackupBeforeDisableTests(TvTestCase):
 
     def test_a_failure_part_way_leaves_a_backup_that_restore_can_use(self):
         self.tv.fail_on = f"pm disable-user --user 0 {WRAITH}"
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(SystemExit):
             self.install()
         self.assertEqual(self.backup()["disabled_by_canvas"], [LAUNCHERX, WRAITH])
         self.assertFalse(self.tv.packages[LAUNCHERX])  # the TV really was left without its stock launcher
@@ -264,12 +268,71 @@ class BackupBeforeDisableTests(TvTestCase):
         self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True})
         self.assertEqual(self.tv.home, STOCK_HOME)
 
+    def test_a_failure_part_way_says_so_names_the_backup_and_says_to_run_restore(self):
+        self.tv.fail_on = f"pm disable-user --user 0 {WRAITH}"
+        with self.assertRaises(SystemExit) as raised:
+            self.install()
+        self.assertNotEqual(exit_status(raised.exception), 0)
+        message = raised.exception.code
+        self.assertTrue(message.startswith("Install stopped part-way (ADB connection dropped). "
+                                           "Everything it changed is recorded in "), message)
+        self.assertTrue(message.endswith("abc123.json: run `tools/canvas restore` to undo it."), message)
+        self.assertEqual(self.tv.issued("settings put"), [])
+        self.assertTrue(self.tv.closed)
+
+    def test_ctrl_c_part_way_is_reported_the_same_way(self):
+        def interrupt(command):
+            if command == f"pm disable-user --user 0 {LAUNCHERX}":
+                raise KeyboardInterrupt
+
+        self.tv.on_command = interrupt
+        with self.assertRaises(SystemExit) as raised:
+            self.install()
+        self.assertNotEqual(exit_status(raised.exception), 0)
+        self.assertIn("Install stopped part-way (Ctrl-C)", raised.exception.code)
+        self.assertIn("run `tools/canvas restore` to undo it", raised.exception.code)
+        self.assertEqual(self.backup()["disabled_by_canvas"], [LAUNCHERX])
+
+    def test_a_failure_before_anything_was_changed_needs_no_restore(self):
+        """The pre-check and the question come before the try: those still stop with their own messages."""
+        self.tv.canvas_can_be_home = False
+        with self.assertRaises(SystemExit) as raised:
+            self.install()
+        self.assertNotIn("part-way", raised.exception.code)
+
     def test_restore_enables_installed_stock_homes_the_backup_does_not_list(self):
         self.stock_backup(disabled_by_canvas=[])
         self.tv.packages[LAUNCHERX] = False  # an install stopped after the disable but before recording it
         canvas.cmd_restore([])
         self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {LAUNCHERX}", f"pm enable {WRAITH}"])
         self.assertTrue(self.tv.packages[LAUNCHERX])
+
+    def test_the_backup_records_what_was_already_disabled_before_canvas(self):
+        self.tv.packages["com.sony.dtv.promos"] = False
+        canvas.take_backup(self.tv)
+        self.assertEqual(self.backup()["disabled_before"], ["com.sony.dtv.promos"])
+
+    def test_a_launcherx_the_owner_had_disabled_before_canvas_stays_disabled_after_restore(self):
+        self.tv.add_home(MITV_HOME, 5)  # the owner used the vendor launcher and had switched Google's off
+        self.tv.packages[LAUNCHERX] = False
+        self.tv.preferred = self.tv.home = MITV_HOME
+        self.install()
+        self.assertEqual(self.backup()["disabled_before"], [LAUNCHERX])
+        self.assertEqual(self.backup()["disabled_by_canvas"], [MITV, WRAITH])
+        canvas.cmd_restore([])
+        self.assertNotIn(f"pm enable {LAUNCHERX}", self.tv.commands)
+        self.assertEqual(self.tv.packages, {LAUNCHERX: False, WRAITH: True, MITV: True})
+        self.assertEqual(self.tv.home, MITV_HOME)
+        self.assertIn("Restored", self.stdout.getvalue())
+
+    def test_an_old_backup_without_the_disabled_list_still_re_enables_both_legacy_homes(self):
+        self.stock_backup(disabled_by_canvas=[])
+        self.assertNotIn("disabled_before", self.backup())
+        self.tv.packages[LAUNCHERX] = False
+        self.tv.packages[WRAITH] = False
+        canvas.cmd_restore([])
+        self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {LAUNCHERX}", f"pm enable {WRAITH}"])
+        self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True})
 
     def test_restore_still_knows_the_two_home_apps_older_installs_disabled_by_name(self):
         self.assertEqual(canvas.LEGACY_STOCK_HOMES, [LAUNCHERX, WRAITH])
@@ -386,12 +449,40 @@ class InstallSafetyTests(TvTestCase):
             self.assertEqual(self.tv.issued(forbidden), [], forbidden)
         self.assertEqual(self.tv.home, STOCK_HOME)
 
-    def test_app_only_install_prints_the_grant_failure_and_carries_on(self):
-        self.tv.grant_output = "Exception occurred while executing 'grant':"
+    def test_a_grant_that_fails_after_a_typed_yes_stops_before_the_home_or_any_disable(self):
+        self.tv.grant_output = "java.lang.SecurityException: Package has not requested permission"
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_install(["canvas.apk"], ask=Answers("y"))
+        self.assertIn("could not be granted WRITE_SECURE_SETTINGS", raised.exception.code)
+        self.assertNotIn("part-way", raised.exception.code)
+        for forbidden in ("appops set", "cmd package set-home-activity", "pm disable-user", "settings put"):
+            self.assertEqual(self.tv.issued(forbidden), [], forbidden)
+        self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True})
+        self.assertEqual(self.backup()["disabled_by_canvas"], [])
+
+    def test_the_permissions_are_granted_after_the_question_and_before_the_home_is_touched(self):
+        seen = []
+
+        def ask(prompt):
+            seen.extend(self.tv.commands)
+            return "y"
+
+        canvas.cmd_install(["canvas.apk"], ask=ask)
+        self.assertEqual([c for c in seen if c.startswith(("pm grant", "appops set"))], [])
+        commands = self.tv.commands
+        grant = commands.index(f"pm grant {canvas.PKG} android.permission.WRITE_SECURE_SETTINGS")
+        appops = commands.index(f"appops set {canvas.PKG} WRITE_SETTINGS allow")
+        first_home = min(i for i, c in enumerate(commands) if c.startswith("cmd package set-home-activity"))
+        self.assertLessEqual(len(seen), grant)  # issued after the answer came back
+        self.assertLess(grant, appops)
+        self.assertLess(appops, first_home)
+
+    def test_app_only_install_grants_nothing_and_carries_on(self):
+        self.tv.grant_output = "Exception occurred while executing 'grant':"  # would fail, but is never asked for
         self.install("--app-only")
         self.assertIn("Installed (app only).", self.stdout.getvalue())
-        self.assertEqual(len(self.tv.issued("appops set")), 1)
-        for forbidden in ("cmd package set-home-activity", "pm disable-user", "settings put"):
+        for forbidden in ("pm grant", "appops set", "cmd package set-home-activity", "pm disable-user",
+                          "settings put"):
             self.assertEqual(self.tv.issued(forbidden), [], forbidden)
 
     def test_a_good_full_install_makes_canvas_home_and_disables_the_stock_homes(self):
@@ -528,9 +619,10 @@ class InstallConfirmationTests(TvTestCase):
         self.assertNotEqual(exit_status(raised.exception), 0)
         self.assertIn("Canvas is installed", raised.exception.code)
         self.assertIn("nothing else on the TV was changed", raised.exception.code)
+        self.assertIn("granted no permissions", raised.exception.code)
         self.assertEqual(len(self.tv.issued("pm install")), 1)
-        for forbidden in ("pm disable-user", "pm enable", "cmd package set-home-activity", "settings put",
-                          "settings delete", "am force-stop", "input keyevent"):
+        for forbidden in ("pm grant", "appops set", "pm disable-user", "pm enable", "cmd package set-home-activity",
+                          "settings put", "settings delete", "am force-stop", "input keyevent"):
             self.assertEqual(self.tv.issued(forbidden), [], forbidden)
         self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True})
         self.assertEqual(self.tv.home, STOCK_HOME)
@@ -597,6 +689,8 @@ class InstallConfirmationTests(TvTestCase):
     def test_app_only_never_asks_and_never_switches_anything_off(self):
         self.run_install(never_asked, "--app-only")
         self.assertEqual(self.tv.issued("pm disable-user"), [])
+        self.assertEqual(self.tv.issued("pm grant"), [])
+        self.assertEqual(self.tv.issued("appops set"), [])
         self.assertEqual(self.tv.home, STOCK_HOME)
 
     def test_with_nothing_to_switch_off_there_is_no_question(self):
@@ -679,9 +773,29 @@ class RestoreVerificationTests(TvTestCase):
             canvas.cmd_restore([])
         self.assertIn("secure sleep_timeout", raised.exception.code)
 
+    LET_GO = [f"pm revoke {canvas.PKG} android.permission.WRITE_SECURE_SETTINGS",
+              f"appops set {canvas.PKG} WRITE_SETTINGS default",
+              f"am force-stop {canvas.PKG}"]
+
+    def test_restore_takes_the_permissions_back_and_stops_canvas_before_changing_anything(self):
+        canvas.cmd_restore([])
+        commands = self.tv.commands
+        for command in self.LET_GO:
+            self.assertEqual(commands.count(command), 1, command)
+        let_go = [commands.index(command) for command in self.LET_GO]
+        self.assertEqual(let_go, sorted(let_go))
+        first_change = min(i for i, c in enumerate(commands) if c.startswith(("pm enable", "settings put",
+                                                                              "settings delete")))
+        self.assertLess(max(let_go), first_change)
+        self.assertLess(max(let_go), min(i for i, c in enumerate(commands) if c.startswith("settings put")))
+        self.assertIn("Restored", self.stdout.getvalue())
+
     def test_restore_with_uninstall_removes_the_app_and_still_succeeds(self):
         canvas.cmd_restore(["--uninstall"])
         self.assertEqual(self.tv.issued("pm uninstall"), [f"pm uninstall {canvas.PKG}"])
+        for command in self.LET_GO:  # uninstalling takes the permissions and stops the app anyway
+            self.assertNotIn(command, self.tv.commands)
+        self.assertIn("Restored", self.stdout.getvalue())
 
     def test_restore_without_a_backup_exits_non_zero(self):
         os.remove(self.backup_file)
@@ -731,6 +845,7 @@ class BackupRefusalTests(TvTestCase):
         data = self.backup()
         self.assertEqual(data["home"], STOCK_HOME)
         self.assertEqual(data["secure"]["screensaver_components"], STOCK_DREAM)
+        self.assertEqual(data["disabled_before"], [])
         self.assertEqual(data["disabled_by_canvas"], [])
 
     def test_an_existing_backup_is_reused_unchanged_even_on_a_canvas_tv(self):

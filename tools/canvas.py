@@ -9,8 +9,13 @@
                                            install Canvas; without --app-only also make it the
                                            home screen and screensaver. It backs up first, lists
                                            the TV's own home app(s) and asks before disabling
-                                           them (--yes answers for you)
-    tools/canvas restore [--uninstall]     undo `install` from the backup
+                                           them (--yes answers for you). Only after a yes does it
+                                           grant Canvas its two settings permissions. --app-only
+                                           installs or updates the app and grants nothing
+                                           (grants from an earlier install survive an update)
+    tools/canvas restore [--uninstall]     undo `install` from the backup, taking Canvas's two
+                                           permissions back; --uninstall also removes Canvas and
+                                           the photos added to it
     tools/canvas debloat <list> [--yes | --group "<name>"]
                                            disable packages from a device list (reversible). The list groups
                                            packages under `## Name` lines; each group is shown and you are
@@ -378,6 +383,12 @@ def enabled(dev, pkg):
     return f"package:{pkg}" not in sh(dev, f"pm list packages -d {pkg}").split()
 
 
+def disabled_packages(dev):
+    """Every package the TV has switched off, from the `package:<name>` lines of `pm list packages -d`."""
+    lines = (line.strip() for line in sh(dev, "pm list packages -d").splitlines())
+    return [line[len("package:"):] for line in lines if line.startswith("package:")]
+
+
 def backup_path(dev):
     return os.path.join(BACKUPS, sh(dev, "settings get secure android_id") + ".json")
 
@@ -425,6 +436,7 @@ def take_backup(dev):
         "home": home,
         "secure": {k: sh(dev, f"settings get secure {k}") for k in SECURE_KEYS},
         "system": {k: sh(dev, f"settings get system {k}") for k in SYSTEM_KEYS},
+        "disabled_before": disabled_packages(dev),  # off before Canvas came: `restore` leaves these off
         "disabled_by_canvas": [],
     }
     save_backup(path, data)
@@ -478,9 +490,50 @@ def confirm_switch_off(stock, yes, ask):
     except (EOFError, KeyboardInterrupt):
         answer = ""
     if answer.strip().lower() not in ("y", "yes"):
-        sys.exit("\nStopped. Canvas is installed (and has its permissions), but nothing else on the TV was changed: "
-                 "the home screen, the home app(s) above and the screensaver are as they were. "
+        sys.exit("\nStopped. Canvas is installed, but nothing else on the TV was changed: it was granted no "
+                 "permissions, and the home screen, the home app(s) above and the screensaver are as they were. "
                  "Run the install again and answer y, or add --yes, to go on.")
+
+
+def make_canvas_home(dev, path, stock):
+    """After the yes: grant the two permissions, switch the TV's own home apps off, check that Canvas won, and only
+    then set the screensaver. If Canvas did not win, the apps switched off by this run are switched back on."""
+    grant = run(dev, f"pm grant {PKG} android.permission.WRITE_SECURE_SETTINGS")
+    if grant:  # a successful grant prints nothing
+        sys.exit("Canvas could not be granted WRITE_SECURE_SETTINGS, so it cannot set the screensaver. "
+                 "The app is installed, but the home screen and screensaver were not changed.")
+    run(dev, f"appops set {PKG} WRITE_SETTINGS allow")
+    with open(path) as f:
+        backup = json.load(f)
+    run(dev, f"cmd package set-home-activity --user 0 {HOME}")
+    disabled_now = []
+    for pkg in stock:
+        if pkg not in backup["disabled_by_canvas"]:
+            backup["disabled_by_canvas"].append(pkg)
+        save_backup(path, backup)  # on disk before the disable, so a failure part-way can still be undone
+        run(dev, f"pm disable-user --user 0 {pkg}")
+        disabled_now.append(pkg)
+    run(dev, f"cmd package set-home-activity --user 0 {HOME}")
+    home = current_home(dev)
+    if not same_component(home, HOME):
+        for pkg in disabled_now:
+            run(dev, f"pm enable {pkg}")
+        stuck = [pkg for pkg in disabled_now if not enabled(dev, pkg)]
+        backup["disabled_by_canvas"] = [p for p in backup["disabled_by_canvas"] if p not in disabled_now]
+        backup["disabled_by_canvas"] += stuck  # still disabled, so `restore` must still know about them
+        save_backup(path, backup)
+        if stuck:
+            sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}), and "
+                     f"{', '.join(stuck)} could not be re-enabled. Run `tools/canvas restore`.")
+        sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}). "
+                 f"Re-enabled the TV's own home app ({', '.join(disabled_now) or 'none had been disabled'}). "
+                 "The screensaver and other settings were not changed.")
+    run(dev, f"settings put secure screensaver_components {DREAM}")
+    run(dev, "settings put secure screensaver_enabled 1")
+    run(dev, "settings put secure screensaver_activate_on_sleep 1")
+    # A stale home task from the old launcher can open Canvas behind the current app.
+    run(dev, "am force-stop com.android.tv.settings")
+    run(dev, "input keyevent KEYCODE_HOME")
 
 
 def cmd_install(args, ask=None):
@@ -497,55 +550,25 @@ def cmd_install(args, ask=None):
             hint = (f"\nThe installed copy was signed with a different key. Remove it first:"
                     f" tools/canvas sh pm uninstall {PKG}") if "UPDATE_INCOMPATIBLE" in out else ""
             sys.exit("Install failed." + hint)
-        grant = run(dev, f"pm grant {PKG} android.permission.WRITE_SECURE_SETTINGS")
-        if grant and not app_only:  # a successful grant prints nothing
-            sys.exit("Canvas could not be granted WRITE_SECURE_SETTINGS, so it cannot set the screensaver. "
-                     "The app is installed, but the home screen and screensaver were not changed.")
-        run(dev, f"appops set {PKG} WRITE_SETTINGS allow")
-        if app_only:
+        if app_only:  # grants nothing: the ones an earlier full install made survive `pm install -r`
             print("Installed (app only).")
             return
 
         # A TV's own launcher usually outranks every other HOME activity (Google TV's always does), so Canvas can
         # only become Home once those launchers are disabled. Ask the TV which HOME activities it has, check that
-        # Canvas is one of them, disable the others, then check Canvas really won.
+        # Canvas is one of them, ask the owner, disable the others, then check Canvas really won.
         components = home_components(dev)
         if not any(same_component(component, HOME) for component in components):
             sys.exit("The TV does not list Canvas as a home screen (no HOME activity for "
                      f"{HOME} in `cmd package query-activities`). Nothing was disabled or changed.")
         stock = stock_homes(components)
         confirm_switch_off(stock, yes, ask)
-        with open(path) as f:
-            backup = json.load(f)
-        run(dev, f"cmd package set-home-activity --user 0 {HOME}")
-        disabled_now = []
-        for pkg in stock:
-            if pkg not in backup["disabled_by_canvas"]:
-                backup["disabled_by_canvas"].append(pkg)
-            save_backup(path, backup)  # on disk before the disable, so a failure part-way can still be undone
-            run(dev, f"pm disable-user --user 0 {pkg}")
-            disabled_now.append(pkg)
-        run(dev, f"cmd package set-home-activity --user 0 {HOME}")
-        home = current_home(dev)
-        if not same_component(home, HOME):
-            for pkg in disabled_now:
-                run(dev, f"pm enable {pkg}")
-            stuck = [pkg for pkg in disabled_now if not enabled(dev, pkg)]
-            backup["disabled_by_canvas"] = [p for p in backup["disabled_by_canvas"] if p not in disabled_now]
-            backup["disabled_by_canvas"] += stuck  # still disabled, so `restore` must still know about them
-            save_backup(path, backup)
-            if stuck:
-                sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}), and "
-                         f"{', '.join(stuck)} could not be re-enabled. Run `tools/canvas restore`.")
-            sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}). "
-                     f"Re-enabled the TV's own home app ({', '.join(disabled_now) or 'none had been disabled'}). "
-                     "The screensaver and other settings were not changed.")
-        run(dev, f"settings put secure screensaver_components {DREAM}")
-        run(dev, "settings put secure screensaver_enabled 1")
-        run(dev, "settings put secure screensaver_activate_on_sleep 1")
-        # A stale home task from the old launcher can open Canvas behind the current app.
-        run(dev, "am force-stop com.android.tv.settings")
-        run(dev, "input keyevent KEYCODE_HOME")
+        try:
+            make_canvas_home(dev, path, stock)
+        except (Exception, KeyboardInterrupt) as e:  # not SystemExit: those messages already say what happened
+            why = "Ctrl-C" if isinstance(e, KeyboardInterrupt) else str(e) or type(e).__name__
+            sys.exit(f"Install stopped part-way ({why}). Everything it changed is recorded in "
+                     f"{os.path.relpath(path, ROOT)}: run `tools/canvas restore` to undo it.")
     time.sleep(3)
     os.makedirs(SHOTS, exist_ok=True)
     cmd_shot(os.path.join(SHOTS, "install-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".png"))
@@ -578,9 +601,18 @@ def cmd_restore(args):
             sys.exit("No backup for this TV in tools/backups/.")
         with open(path) as f:
             backup = json.load(f)
-        # Also re-enable the two home apps older installs disabled by name, in case one stopped before it recorded them.
+        if "--uninstall" not in args:
+            # Canvas puts itself back as the screensaver at boot and on its home screen while it can write the
+            # settings, and its phone page runs while it runs. Take both permissions back and stop it first.
+            run(dev, f"pm revoke {PKG} android.permission.WRITE_SECURE_SETTINGS")
+            run(dev, f"appops set {PKG} WRITE_SETTINGS default")
+            run(dev, f"am force-stop {PKG}")  # stopped: no BOOT_COMPLETED until something launches it again
+        # Also re-enable the two home apps older installs disabled by name, in case one stopped before it recorded
+        # them, but not one that was already off before Canvas came. Backups from before `disabled_before` existed
+        # do not say, so for them both are re-enabled as before.
+        before = backup.get("disabled_before", [])
         packages = list(dict.fromkeys(backup["disabled_by_canvas"]
-                                      + [p for p in LEGACY_STOCK_HOMES if installed(dev, p)]))
+                                      + [p for p in LEGACY_STOCK_HOMES if installed(dev, p) and p not in before]))
         for pkg in packages:
             run(dev, f"pm enable {pkg}")
         for table, values in (("secure", backup["secure"]), ("system", backup["system"])):
