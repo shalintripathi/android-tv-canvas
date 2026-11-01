@@ -6,8 +6,8 @@ Nothing is ever uninstalled. Each app is switched off for the main user (`pm dis
 
 | List | For | Status |
 |---|---|---|
-| [`google-tv-common.txt`](google-tv-common.txt) | Any Google TV: Google's own extras (Google TV app, Play Games, feedback) | Packages are the ones on the tested TV; not tried on other brands |
-| [`sony-bravia-bf1.txt`](sony-bravia-bf1.txt) | Sony BRAVIA BF1, Android 12 Google TV | Tested on this TV |
+| [`google-tv-common.txt`](google-tv-common.txt) | Google TV: Google's own extras (Google TV app, Play Games, feedback) | Should be safe on Google TV; untested beyond the Sony BRAVIA, and not yet applied even there |
+| [`sony-bravia-bf1.txt`](sony-bravia-bf1.txt) | Sony BRAVIA BF1, Android 12 Google TV | Only the "Sony promos" group has been applied on the test TV; the other groups are untested |
 
 You do not need a list for your exact TV. A list only names packages; one that names a package your TV does not have just reports it and carries on.
 
@@ -84,7 +84,7 @@ Switching these off can leave a TV unable to search, type, tune, install apps or
 - Settings (`com.android.tv.settings`, `com.android.settings`);
 - the Play Store and Google Play services (`com.android.vending`, `com.google.android.gms`);
 - Android System WebView (`com.google.android.webview`);
-- the TV's own home app. `tools/canvas install` switches that off itself, with a backup and a check that Canvas really took over, and `tools/canvas restore` brings it back.
+- the TV's own home app. `tools/canvas install` switches that off itself, after listing it and asking you, with a backup and a check that Canvas really took over, and `tools/canvas restore` brings it back.
 
 ## Contributing a list
 

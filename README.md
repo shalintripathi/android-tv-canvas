@@ -54,24 +54,25 @@ tools/canvas install build/canvas-*.apk      # or the path of the APK you downlo
 Accept "Allow USB debugging?" on the TV when it asks. `install` then:
 
 1. backs up the TV's home screen, screensaver and sleep settings to `tools/backups/` on your computer;
-2. installs Canvas and grants it permission to set its own screensaver;
+2. installs Canvas and grants it the two permissions it needs to change the screensaver and sleep settings (see [Privacy & security](#privacy--security));
 3. asks the TV which home apps it has, and stops before switching anything off if Canvas is not one of the choices;
-4. switches off the TV's own home app or apps (whatever they are called on your TV; it prints the list, and writes each one to the backup before touching it), and makes Canvas the home app;
-5. checks that Canvas really became the home screen. If it did not, it switches the TV's own home app back on and says so;
-6. only then sets the Canvas screensaver.
+4. **lists the TV's own home apps and asks you first**: `Disable these and make Canvas the home screen? [y/N]`. The default is No. If you answer No (or press Enter, Ctrl-C or Ctrl-D), Canvas stays installed and nothing else on the TV changes. `--yes` skips the question. The list never includes Canvas, the system Settings apps, or any app that provides the system's FallbackHome safety net;
+5. switches those apps off (each one is written to the backup before it is touched) and makes Canvas the home app;
+6. checks that Canvas really became the home screen. If it did not, it switches those apps back on and says so;
+7. only then sets the Canvas screensaver.
 
 Press Home on the remote when it finishes.
 
 **Undo everything:** `tools/canvas restore --uninstall`.
 
-**Using Claude Code?** Open it in this folder and say: *"Install Canvas on my TV and make it the home screen."* It can follow these steps with `tools/canvas`.
+**Using Claude Code?** Open it in this folder and say: *"Install Canvas on my TV and make it the home screen."* It can follow these steps with `tools/canvas`. Because `install` asks before it switches off the TV's own home app, Claude Code will show you that list and ask you first, and only then run it again with `--yes`.
 
 ### Remove preinstalled apps (you choose)
 
 Optional. Many TVs ship with promo apps, shop-demo modes and trial apps that you may never use. Canvas can switch off the ones you pick, and only those:
 
 ```bash
-tools/canvas debloat devices/google-tv-common.txt     # Google's own extras, any Google TV
+tools/canvas debloat devices/google-tv-common.txt     # Google's own extras; should be safe on Google TV, untested beyond the Sony BRAVIA
 tools/canvas debloat devices/sony-bravia-bf1.txt      # the list for the tested Sony BRAVIA
 ```
 
@@ -83,9 +84,9 @@ Nothing is uninstalled. Apps are only switched off for the main user, and `tools
 
 | TV | Android | Status |
 |---|---|---|
-| Sony BRAVIA (BF1) | 12, Google TV | Home screen, screensaver and phone page work. `install` and `debloat` (the "Sony promos" group) have been run on it. Photos were added from an iPhone. |
+| Sony BRAVIA (BF1) | 12, Google TV | Home screen, screensaver and phone page work, with photos added from an iPhone. `install` and `restore` were exercised on it with an earlier version that switched off Google TV's two home apps by name; the generic home-app detection that replaced it is new and so far tested offline only. `debloat` has been applied for the "Sony promos" group only. |
 
-Not yet checked on a TV: Canvas's start-up time and memory use, whether the remote's voice button still behaves as before once the TV's own home app is off, the Left and Right keys during the screensaver, the screensaver staying away while a video plays, and adding photos from an Android phone.
+Not yet checked on a TV: the generic home-app detection and the new question in `install`, Canvas's start-up time and memory use, whether the remote's voice button still behaves as before once the TV's own home app is off, the Left and Right keys during the screensaver, the screensaver staying away while a video plays, and adding photos from an Android phone.
 
 **Expected to work, but untested.** Canvas needs Android 7.0 (API 24) or newer. These should work:
 
@@ -99,7 +100,7 @@ Some makers lock their launcher so it cannot be switched off. In that case `tool
 ## FAQ
 
 **How do I remove ads from the Android TV or Google TV home screen?**
-The ads and sponsored rows are part of the TV's own launcher: Google's launcher on Google TV (`com.google.android.apps.tv.launcherx`), or the maker's launcher on other Android TVs. Canvas replaces whichever one your TV has. `tools/canvas install` finds the TV's home apps, switches them off (reversibly, with a backup) and makes Canvas the home app. Your installed apps stay installed. Install only switches off packages that offer themselves as a home screen, not the Play Store or voice search, but whether the remote's voice button still behaves as before has not been checked yet.
+The ads and sponsored rows are part of the TV's own launcher: Google's launcher on Google TV (`com.google.android.apps.tv.launcherx`), or the maker's launcher on other Android TVs. Canvas replaces whichever one your TV has. `tools/canvas install` finds the TV's home apps, lists them and asks you, then switches them off (reversibly, with a backup) and makes Canvas the home app. Your installed apps stay installed. Install only switches off packages that offer themselves as a home screen, not the Play Store or voice search, but whether the remote's voice button still behaves as before has not been checked yet.
 
 **Does it work on my TV?**
 It is tested on one TV, a Sony BRAVIA running Google TV. Other Android TV and Google TV devices are expected to work. See [Tested on](#tested-on), and please tell us how it goes on yours.
@@ -125,7 +126,8 @@ It is Android's standard throwaway debug signing key, with the public password "
 - **The phone page is served by the TV.** When you open the Phone screen, the TV serves a small web page on port 8765 of your home network, over plain HTTP (not HTTPS). Only use it on a network you trust, not on public or shared Wi-Fi. Without pairing, a device on your network sees only a page asking for a PIN.
 - **Pairing is by QR code or PIN.** The code on the TV expires after 10 minutes, and 5 wrong PINs void it. A paired phone gets a long random session value; the TV stores only its SHA-256 hash. You can see paired phones, and remove them, from the phone page.
 - **State-changing requests need two things:** the pairing cookie and a custom `X-Canvas` header. A web page you happen to open on your phone cannot send that header to the TV, so it cannot add or delete photos or change settings behind your back.
-- **Canvas never needs your Wi-Fi password.** It asks for the network permission to run the phone page, and for the location permission Android requires before it lets an app read the Wi-Fi network's name, which Canvas shows in the header. It does not use your location. `tools/canvas install` also grants it the permission to change its own screensaver setting.
+- **Canvas never needs your Wi-Fi password.** It asks for the network permission to run the phone page, and for the location permission Android requires before it lets an app read the Wi-Fi network's name, which Canvas shows in the header. It does not use your location.
+- **Two powerful permissions, granted by `tools/canvas install`.** `WRITE_SECURE_SETTINGS` lets an app write to the TV's system-wide Secure settings, which is far more than Canvas needs. Canvas uses it only for the screensaver and sleep settings (`screensaver_components`, `screensaver_enabled`, `screensaver_activate_on_sleep` and `sleep_timeout`). `WRITE_SETTINGS`, granted through `appops`, lets an app write the System settings; Canvas uses it only for the screen-off timeout (`screen_off_timeout`). The grants are on the Canvas package alone and go away when it is uninstalled.
 - **Install and debloat are reversible.** Install keeps a backup in `tools/backups/` on your computer. `tools/canvas restore` undoes install, and `tools/canvas undebloat <list>` undoes debloat. Nothing is ever uninstalled except by `restore --uninstall`, which removes Canvas itself.
 
 ## Compared with

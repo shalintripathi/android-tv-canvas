@@ -43,6 +43,8 @@ MITV = "com.mitv.tvhome.atv"
 MITV_HOME = MITV + "/.MainActivity"
 VENDOR = "com.vendor.launcher"
 VENDOR_HOME = VENDOR + "/.Home"
+VENDOR_SETTINGS = "com.vendor.tv.settings"  # a vendor's own Settings app that hosts its own FallbackHome
+VENDOR_SETTINGS_HOME = VENDOR_SETTINGS + "/.FallbackHome"
 SYSTEM_PACKAGES = (canvas.PKG, "com.android.tv.settings", "com.android.settings")  # always installed and enabled
 STOCK_DREAM = "com.google.android.apps.tv.dreamx/.service.Backdrop"
 RESOLVER = "android/com.android.internal.app.ResolverActivity"
@@ -222,7 +224,8 @@ class TvTestCase(unittest.TestCase):
             return json.load(f)
 
     def install(self, *flags):
-        canvas.cmd_install(["canvas.apk", *flags])
+        """A full or app-only install with the question answered (--yes), the way the older tests expect."""
+        canvas.cmd_install(["canvas.apk", "--yes", *flags])
 
     def stock_backup(self, **changes):
         data = {"taken": "2026-11-01T00:00:00", "model": "BRAVIA BF1", "home": STOCK_HOME,
@@ -428,6 +431,18 @@ class StockHomeDetectionTests(unittest.TestCase):
         self.assertEqual(canvas.home_components(tv),  # ...and none of them is taken for a component
                          [MITV_HOME, STOCK_HOME, WRAITH_HOME, canvas.HOME, FALLBACK_HOME])
 
+    def test_a_vendor_settings_package_with_a_fallback_home_is_kept(self):
+        components = [MITV_HOME, VENDOR_SETTINGS_HOME, canvas.HOME, FALLBACK_HOME]
+        self.assertEqual(canvas.stock_homes(components), [MITV])
+
+    def test_a_package_with_a_fallback_home_is_kept_whole_even_when_it_has_another_home_activity(self):
+        components = [VENDOR_SETTINGS + "/.Home", MITV_HOME, VENDOR_SETTINGS + "/.system.FallbackHome", canvas.HOME]
+        self.assertEqual(canvas.stock_homes(components), [MITV])
+
+    def test_only_a_class_named_fallback_home_makes_a_package_a_safety_net(self):
+        self.assertEqual(canvas.stock_homes([VENDOR + "/.FallbackHomeScreen", VENDOR + "/.NotAFallbackHome2"]),
+                         [VENDOR])
+
     def test_the_settings_apps_and_canvas_are_what_is_kept(self):
         self.assertEqual(sorted(canvas.KEEP_HOMES), sorted(SYSTEM_PACKAGES))
 
@@ -471,6 +486,15 @@ class GenericInstallTests(TvTestCase):
         self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True, MITV: True})
         self.assertEqual(self.tv.home, MITV_HOME)
 
+    def test_a_vendor_settings_fallback_home_is_never_listed_or_disabled(self):
+        self.tv.add_home(MITV_HOME, 5)
+        self.tv.add_home(VENDOR_SETTINGS_HOME, -1000)
+        self.install()
+        self.assertEqual(self.disabled(), [MITV, LAUNCHERX, WRAITH])
+        self.assertNotIn(VENDOR_SETTINGS, self.stdout.getvalue())
+        self.assertTrue(self.tv.packages[VENDOR_SETTINGS])
+        self.assertEqual(self.tv.home, canvas.HOME)
+
     def test_installing_again_on_a_tv_that_is_already_on_canvas_switches_nothing_else_off(self):
         self.install()
         self.tv.commands.clear()
@@ -488,6 +512,118 @@ class GenericInstallTests(TvTestCase):
         self.assertEqual(len(self.tv.issued("cmd package query-activities")), 1)
         self.assertEqual(self.disabled(), [])
         self.assertTrue(self.tv.packages[MITV])
+
+
+class InstallConfirmationTests(TvTestCase):
+    """A full install lists the TV's own home apps and asks before switching them off; --yes answers for you."""
+
+    QUESTION = "Disable these and make Canvas the home screen? [y/N] "
+
+    def run_install(self, ask, *flags):
+        canvas.cmd_install(["canvas.apk", *flags], ask=ask)
+
+    def assert_stopped_with_only_the_app_installed(self, ask, *flags):
+        with self.assertRaises(SystemExit) as raised:
+            self.run_install(ask, *flags)
+        self.assertNotEqual(exit_status(raised.exception), 0)
+        self.assertIn("Canvas is installed", raised.exception.code)
+        self.assertIn("nothing else on the TV was changed", raised.exception.code)
+        self.assertEqual(len(self.tv.issued("pm install")), 1)
+        for forbidden in ("pm disable-user", "pm enable", "cmd package set-home-activity", "settings put",
+                          "settings delete", "am force-stop", "input keyevent"):
+            self.assertEqual(self.tv.issued(forbidden), [], forbidden)
+        self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True})
+        self.assertEqual(self.tv.home, STOCK_HOME)
+        self.assertEqual(self.tv.settings[("secure", "screensaver_components")], STOCK_DREAM)
+        self.assertEqual(self.backup()["disabled_by_canvas"], [])
+        self.assertTrue(self.tv.closed)
+
+    def test_no_enter_and_anything_but_yes_stop_the_install_with_only_the_app_on_the_tv(self):
+        for answer in ("n", "N", "", "  ", "maybe", "yep"):
+            with self.subTest(answer=answer):
+                self.setUp()
+                self.assert_stopped_with_only_the_app_installed(Answers(answer))
+
+    def test_end_of_input_and_ctrl_c_stop_it_too(self):
+        for answers in ((), (KeyboardInterrupt,)):
+            with self.subTest(answers=answers):
+                self.setUp()
+                self.assert_stopped_with_only_the_app_installed(Answers(*answers))
+
+    def test_the_apps_are_listed_one_per_line_and_asked_about_once_before_anything_is_changed(self):
+        seen = []
+
+        def ask(prompt):
+            seen.append((prompt, list(self.tv.commands)))
+            return "n"
+
+        with self.assertRaises(SystemExit):
+            self.run_install(ask)
+        self.assertEqual([prompt for prompt, _ in seen], [self.QUESTION])
+        before = seen[0][1]
+        self.assertEqual(len([c for c in before if c.startswith("cmd package query-activities")]), 1)
+        for forbidden in ("cmd package set-home-activity", "pm disable-user", "settings put"):
+            self.assertEqual([c for c in before if c.startswith(forbidden)], [], forbidden)
+        lines = self.stdout.getvalue().splitlines()
+        self.assertIn(f"  {LAUNCHERX}", lines)
+        self.assertIn(f"  {WRAITH}", lines)
+        self.assertNotIn("  com.android.tv.settings", lines)
+        self.assertNotIn("  " + canvas.PKG, lines)
+
+    def test_y_or_yes_in_any_case_goes_on_and_makes_canvas_the_home_screen(self):
+        for answer in ("y", "Y", "yes", " YES "):
+            with self.subTest(answer=answer):
+                self.setUp()
+                ask = Answers(answer)
+                self.run_install(ask)
+                self.assertEqual(ask.prompts, [self.QUESTION])
+                self.assertEqual(self.tv.home, canvas.HOME)
+                self.assertEqual(self.tv.packages, {LAUNCHERX: False, WRAITH: False})
+                self.assertEqual(self.backup()["disabled_by_canvas"], [LAUNCHERX, WRAITH])
+                self.assertEqual(self.tv.settings[("secure", "screensaver_components")], canvas.DREAM)
+
+    def test_yes_goes_on_without_asking_but_still_shows_the_list(self):
+        self.run_install(never_asked, "--yes")
+        self.assertEqual(self.tv.home, canvas.HOME)
+        self.assertIn(f"  {LAUNCHERX}", self.stdout.getvalue().splitlines())
+
+    def test_after_a_no_the_same_install_can_be_run_again_and_answered_yes(self):
+        with self.assertRaises(SystemExit):
+            self.run_install(Answers("n"))
+        self.run_install(Answers("y"))
+        self.assertEqual(self.tv.home, canvas.HOME)
+        self.assertEqual(self.backup()["disabled_by_canvas"], [LAUNCHERX, WRAITH])
+
+    def test_app_only_never_asks_and_never_switches_anything_off(self):
+        self.run_install(never_asked, "--app-only")
+        self.assertEqual(self.tv.issued("pm disable-user"), [])
+        self.assertEqual(self.tv.home, STOCK_HOME)
+
+    def test_with_nothing_to_switch_off_there_is_no_question(self):
+        self.run_install(never_asked, "--yes")  # first install: switches the two Google TV home apps off
+        self.tv.commands.clear()
+        self.run_install(never_asked)  # nothing left that offers itself as a home screen except Canvas
+        self.assertEqual(self.tv.issued("pm disable-user"), [])
+        self.assertEqual(self.tv.home, canvas.HOME)
+        self.assertIn("no other home app", self.stdout.getvalue())
+
+    def test_unknown_flags_and_extra_arguments_stop_before_the_tv_is_touched(self):
+        for args in (["canvas.apk", "--force"], ["canvas.apk", "-y"], ["canvas.apk", "--yes=1"],
+                     ["canvas.apk", "other.apk"]):
+            with self.subTest(args=args):
+                with self.assertRaises(SystemExit) as raised:
+                    canvas.cmd_install(args, ask=never_asked)
+                self.assertNotEqual(exit_status(raised.exception), 0)
+                self.assertIn("usage: tools/canvas install", raised.exception.code)
+                self.assertEqual(self.tv.commands, [])
+                self.assertFalse(os.path.exists(self.backup_file))
+
+    def test_main_passes_install_arguments_through_and_asks_through_input(self):
+        with mock.patch.object(sys, "argv", ["canvas", "install", "canvas.apk"]), \
+                mock.patch("builtins.input", return_value="y") as asked:
+            canvas.main()
+        asked.assert_called_once_with(self.QUESTION)
+        self.assertEqual(self.tv.home, canvas.HOME)
 
 
 class RestoreVerificationTests(TvTestCase):

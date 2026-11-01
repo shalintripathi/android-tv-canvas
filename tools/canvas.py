@@ -5,10 +5,11 @@
     tools/canvas probe                     model and Android version
     tools/canvas sh '<command>'            run a shell command on the TV
     tools/canvas shot out.png              screenshot
-    tools/canvas install [apk] [--app-only]
+    tools/canvas install [apk] [--app-only] [--yes]
                                            install Canvas; without --app-only also make it the
-                                           home screen and screensaver. It backs up first, then
-                                           disables the TV's own home app(s), whatever they are
+                                           home screen and screensaver. It backs up first, lists
+                                           the TV's own home app(s) and asks before disabling
+                                           them (--yes answers for you)
     tools/canvas restore [--uninstall]     undo `install` from the backup
     tools/canvas debloat <list> [--yes | --group "<name>"]
                                            disable packages from a device list (reversible). The list groups
@@ -53,8 +54,10 @@ PKG = "io.github.shalintripathi.canvas"
 HOME = PKG + "/.home.HomeActivity"
 DREAM = PKG + "/.frame.FrameDreamService"
 # Home apps that `install` never disables: Canvas itself, and the system Settings apps, whose FallbackHome is
-# the TV's safety net when no other home app is enabled.
+# the TV's safety net when no other home app is enabled. Any other package with a FallbackHome (a vendor's own
+# Settings, say) is kept too: see stock_homes.
 KEEP_HOMES = [PKG, "com.android.tv.settings", "com.android.settings"]
+SAFETY_NET_CLASS = "FallbackHome"
 # The two home apps older versions of `install` disabled by name. Only `restore` still uses this list, to
 # re-enable them on a TV where an old install recorded nothing.
 LEGACY_STOCK_HOMES = ["com.google.android.apps.tv.launcherx", "com.google.android.tungsten.setupwraith"]
@@ -354,11 +357,15 @@ def home_components(dev):
 
 def stock_homes(components):
     """The packages `install` has to disable before Canvas can be Home: the package of every HOME activity,
-    except KEEP_HOMES. In the order listed, each package once."""
+    except KEEP_HOMES and any package that has a FallbackHome among its HOME activities (that class is the system's
+    safety net when no other home app works, and `pm disable-user` would switch off the rest of the package with it).
+    In the order listed, each package once."""
+    safety_nets = {component.partition("/")[0] for component in components
+                   if component.partition("/")[2].endswith(SAFETY_NET_CLASS)}
     packages = []
     for component in components:
         pkg = component.partition("/")[0]
-        if pkg not in KEEP_HOMES and pkg not in packages:
+        if pkg not in KEEP_HOMES and pkg not in safety_nets and pkg not in packages:
             packages.append(pkg)
     return packages
 
@@ -434,9 +441,52 @@ def default_apk():
     sys.exit("No APK found. Run tools/fetch-ci-apk.sh or pass the APK path.")
 
 
-def cmd_install(args):
-    apk = next((a for a in args if not a.startswith("--")), None) or default_apk()
-    app_only = "--app-only" in args
+INSTALL_USAGE = "usage: tools/canvas install [apk] [--app-only] [--yes]"
+
+
+def parse_install_args(args):
+    """(apk path or None, app only?, answer yes to the question?). Rejects anything else."""
+    apk, app_only, yes = None, False, False
+    for arg in args:
+        if arg == "--app-only":
+            app_only = True
+        elif arg == "--yes":
+            yes = True
+        elif arg.startswith("-"):
+            sys.exit(f"Unknown option {arg}\n" + INSTALL_USAGE)
+        elif apk is None:
+            apk = arg
+        else:
+            sys.exit(f"Unexpected argument {arg!r}\n" + INSTALL_USAGE)
+    return apk, app_only, yes
+
+
+def confirm_switch_off(stock, yes, ask):
+    """Show the TV's own home apps that are about to be disabled and ask. Anything but y or yes, end of input
+    (Ctrl-D) and Ctrl-C all stop the install before anything is switched off. Nothing to disable: no question."""
+    if not stock:
+        print("The TV has no other home app to switch off.")
+        return
+    print("These apps offer themselves as the TV's home screen. To make Canvas the home screen they have to be "
+          "switched off (reversible with `tools/canvas restore`):")
+    for pkg in stock:
+        print(f"  {pkg}")
+    if yes:
+        return
+    try:
+        answer = ask("Disable these and make Canvas the home screen? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        sys.exit("\nStopped. Canvas is installed (and has its permissions), but nothing else on the TV was changed: "
+                 "the home screen, the home app(s) above and the screensaver are as they were. "
+                 "Run the install again and answer y, or add --yes, to go on.")
+
+
+def cmd_install(args, ask=None):
+    ask = ask or input
+    apk, app_only, yes = parse_install_args(args)
+    apk = apk or default_apk()
     with tv() as dev:
         path = take_backup(dev)
         print(f"Uploading {os.path.relpath(apk, ROOT)}…")
@@ -464,7 +514,7 @@ def cmd_install(args):
             sys.exit("The TV does not list Canvas as a home screen (no HOME activity for "
                      f"{HOME} in `cmd package query-activities`). Nothing was disabled or changed.")
         stock = stock_homes(components)
-        print("Switching off the TV's own home apps (undo with `tools/canvas restore`): " + (", ".join(stock) or "none"))
+        confirm_switch_off(stock, yes, ask)
         with open(path) as f:
             backup = json.load(f)
         run(dev, f"cmd package set-home-activity --user 0 {HOME}")
