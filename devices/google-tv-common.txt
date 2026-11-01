@@ -1,0 +1,11 @@
+# Google extras that are on most Google TV devices and that few people use. Works on any Google TV.
+# Apply: tools/canvas debloat devices/google-tv-common.txt      (asks about the group, default No)
+#        tools/canvas debloat devices/google-tv-common.txt --yes   (no questions)
+# Undo:  tools/canvas undebloat devices/google-tv-common.txt     (same options)
+# Everything is DISABLED for user 0, never uninstalled. Answer N to leave a group alone.
+# A package this TV does not have is reported and skipped; nothing else is affected.
+
+## Google extras
+com.google.android.videos                    # Google TV app / Play Movies & TV
+com.google.android.play.games                # Google Play Games
+com.google.android.feedback                  # sends feedback and bug reports to Google

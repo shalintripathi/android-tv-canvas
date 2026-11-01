@@ -727,6 +727,26 @@ class DeviceListParsingTests(unittest.TestCase):
         self.assertTrue(all(description for _, packages in groups for _, description in packages),
                         "every package in the committed list should say what it is")
 
+    def test_the_committed_generic_google_tv_list_is_one_group_of_google_extras(self):
+        groups = canvas.read_groups(os.path.join(TOOLS, os.pardir, "devices", "google-tv-common.txt"))
+        self.assertEqual([name for name, _ in groups], ["Google extras"])
+        self.assertEqual([pkg for pkg, _ in groups[0][1]],
+                         ["com.google.android.videos", "com.google.android.play.games", "com.google.android.feedback"])
+
+    def test_every_committed_device_list_parses_and_explains_each_package(self):
+        folder = os.path.join(TOOLS, os.pardir, "devices")
+        lists = sorted(name for name in os.listdir(folder) if name.endswith(".txt"))
+        self.assertIn("google-tv-common.txt", lists)
+        self.assertIn("sony-bravia-bf1.txt", lists)
+        never = ("com.android.tv.settings", "com.android.settings", "com.android.vending", "com.google.android.gms",
+                 "com.google.android.webview", "com.google.android.katniss", "com.google.android.inputmethod.latin")
+        for name in lists:
+            groups = canvas.read_groups(os.path.join(folder, name))
+            for _, packages in groups:
+                for pkg, description in packages:
+                    self.assertTrue(description, f"{name}: {pkg} has no description")
+                    self.assertNotIn(pkg, never + tuple(canvas.KEEP_HOMES), f"{name}: {pkg} must never be in a list")
+
     def test_a_missing_list_file_is_a_message_not_a_traceback(self):
         with self.assertRaises(SystemExit) as raised:
             canvas.read_groups(os.path.join(TOOLS, "no-such-list.txt"))
