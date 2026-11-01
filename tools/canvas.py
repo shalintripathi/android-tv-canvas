@@ -502,9 +502,8 @@ def confirm_switch_off(stock, yes, ask):
     except (EOFError, KeyboardInterrupt):
         answer = ""
     if answer.strip().lower() not in ("y", "yes"):
-        sys.exit("\nStopped. Canvas is installed, but nothing else on the TV was changed: it was not granted the "
-                 "location or settings permissions, and the home screen, the home app(s) above and the screensaver "
-                 "are as they were. "
+        sys.exit("\nStopped. Canvas is installed, but nothing else on the TV was changed: this run granted it no "
+                 "permissions, and the home screen, the home app(s) above and the screensaver are as they were. "
                  "Run the install again and answer y, or add --yes, to go on.")
 
 
@@ -525,9 +524,9 @@ def make_canvas_home(dev, path, stock):
         sys.exit("Canvas could not be granted WRITE_SECURE_SETTINGS, so it cannot set the screensaver. "
                  "The app is installed, but the home screen and screensaver were not changed.")
     run(dev, f"appops set {PKG} WRITE_SETTINGS allow")
-    for permission in LOCATION:
-        if run(dev, f"pm grant {PKG} {permission}"):
-            print("Canvas could not be granted location, so its header will not show the Wi-Fi network's name.")
+    refused = [permission for permission in LOCATION if run(dev, f"pm grant {PKG} {permission}")]
+    if refused:  # not fatal: only the Wi-Fi name in the header needs it
+        print("Canvas could not be granted location, so its header will not show the Wi-Fi network's name.")
     with open(path) as f:
         backup = json.load(f)
     run(dev, f"cmd package set-home-activity --user 0 {HOME}")

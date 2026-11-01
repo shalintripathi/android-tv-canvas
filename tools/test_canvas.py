@@ -514,9 +514,9 @@ class InstallSafetyTests(TvTestCase):
                                            *canvas.LOCATION})
 
     def test_a_refused_location_grant_only_costs_the_wifi_name_in_the_header(self):
-        self.tv.grant_errors = {canvas.LOCATION[0]: "java.lang.SecurityException: not allowed"}
+        self.tv.grant_errors = {permission: "java.lang.SecurityException: not allowed" for permission in canvas.LOCATION}
         canvas.cmd_install(["canvas.apk"], ask=Answers("y"))
-        self.assertIn("will not show the Wi-Fi network's name", self.stdout.getvalue())
+        self.assertEqual(self.stdout.getvalue().count("will not show the Wi-Fi network's name"), 1)
         self.assertEqual(self.tv.home, canvas.HOME)
         self.assertEqual(self.tv.settings[("secure", "screensaver_components")], canvas.DREAM)
 
@@ -673,7 +673,7 @@ class InstallConfirmationTests(TvTestCase):
         self.assertNotEqual(exit_status(raised.exception), 0)
         self.assertIn("Canvas is installed", raised.exception.code)
         self.assertIn("nothing else on the TV was changed", raised.exception.code)
-        self.assertIn("not granted the location or settings permissions", raised.exception.code)
+        self.assertIn("this run granted it no permissions", raised.exception.code)
         self.assertEqual(self.tv.issued("pm install"), ["pm install -r /data/local/tmp/canvas.apk"])  # no -g
         self.assertEqual(self.tv.granted, set())
         for forbidden in ("pm grant", "appops set", "pm disable-user", "pm enable", "cmd package set-home-activity",
