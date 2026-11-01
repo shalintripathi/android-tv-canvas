@@ -79,6 +79,9 @@ class FakeTV:
         self.ignore = ()  # commands starting with one of these do nothing, as if the TV refused them
         self.on_command = None  # called with each command before it is answered
         self.pm_errors = {}  # package -> what pm prints instead of changing it (see UNKNOWN_PACKAGE)
+        self.grant_errors = {}  # permission -> what `pm grant` prints instead of granting it
+        self.granted = set()  # Canvas's permissions from `pm grant` and `appops set` (as WRITE_SETTINGS)
+        self.running = set()  # packages with a live process
 
     def close(self):
         self.closed = True
@@ -131,6 +134,11 @@ class FakeTV:
         else:
             self.home = top
 
+    def _stop(self, pkg):
+        """Kill a package's process. Android starts the home app again at once if that is what was killed."""
+        if self.home.split("/")[0] != pkg:
+            self.running.discard(pkg)
+
     def _answer(self, command):
         if self.ignore and command.startswith(self.ignore):
             return ""
@@ -160,11 +168,28 @@ class FakeTV:
             return f"package:{pkg}" if pkg in self.packages else ""
         if command.startswith("pm install"):
             return self.install_output
-        if command.startswith(("rm ", "am force-stop", "input keyevent", "appops set")):
+        if command.startswith("rm "):
+            return ""
+        if command == "input keyevent KEYCODE_HOME":
+            self.running.add(self.home.split("/")[0])
+            return ""
+        if command.startswith("am force-stop"):
+            self._stop(words[-1])
+            return ""
+        if command.startswith("pidof"):
+            return "4242" if words[-1] in self.running else ""
+        if command.startswith("appops set"):
+            (self.granted.add if words[-1] == "allow" else self.granted.discard)(words[-2])
             return ""
         if command.startswith("pm grant"):
-            return self.grant_output
+            out = self.grant_output or self.grant_errors.get(words[-1], "")
+            if not out:
+                self.granted.add(words[-1])
+            return out
         if command.startswith("pm revoke"):
+            self.granted.discard(words[-1])
+            if words[-1] in canvas.LOCATION:  # taking back a runtime permission kills the app
+                self._stop(words[-2])
             return ""
         if command.startswith("cmd package set-home-activity"):
             component = words[-1]
@@ -193,6 +218,8 @@ class FakeTV:
             self.settings.pop((words[2], words[3]), None)
             return "Deleted 1 row"
         if command.startswith("pm uninstall"):
+            self.running.discard(words[-1])
+            self.granted.clear()
             return "Success"
         raise AssertionError(f"FakeTV was sent a command it does not know: {command!r}")
 
@@ -408,6 +435,8 @@ class InstallSafetyTests(TvTestCase):
         self.assertIn("did not become the home screen", raised.exception.code)
         self.assertIn(VENDOR_HOME, raised.exception.code)
         self.assertIn("Re-enabled the TV's own home app", raised.exception.code)
+        self.assertIn("took back Canvas's permissions", raised.exception.code)
+        self.assertEqual(self.tv.granted, set())
         everything = [VENDOR, LAUNCHERX, WRAITH]  # the TV's order: highest priority first
         self.assertEqual(self.tv.issued("pm disable-user"), [f"pm disable-user --user 0 {p}" for p in everything])
         self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {p}" for p in everything])
@@ -477,6 +506,19 @@ class InstallSafetyTests(TvTestCase):
         self.assertLessEqual(len(seen), grant)  # issued after the answer came back
         self.assertLess(grant, appops)
         self.assertLess(appops, first_home)
+
+    def test_a_full_install_grants_location_and_both_settings_permissions_after_the_yes(self):
+        canvas.cmd_install(["canvas.apk"], ask=Answers("y"))
+        self.assertEqual(self.tv.issued("pm install"), ["pm install -r /data/local/tmp/canvas.apk"])  # no -g
+        self.assertEqual(self.tv.granted, {"android.permission.WRITE_SECURE_SETTINGS", "WRITE_SETTINGS",
+                                           *canvas.LOCATION})
+
+    def test_a_refused_location_grant_only_costs_the_wifi_name_in_the_header(self):
+        self.tv.grant_errors = {canvas.LOCATION[0]: "java.lang.SecurityException: not allowed"}
+        canvas.cmd_install(["canvas.apk"], ask=Answers("y"))
+        self.assertIn("will not show the Wi-Fi network's name", self.stdout.getvalue())
+        self.assertEqual(self.tv.home, canvas.HOME)
+        self.assertEqual(self.tv.settings[("secure", "screensaver_components")], canvas.DREAM)
 
     def test_app_only_install_grants_nothing_and_carries_on(self):
         self.tv.grant_output = "Exception occurred while executing 'grant':"  # would fail, but is never asked for
@@ -631,8 +673,9 @@ class InstallConfirmationTests(TvTestCase):
         self.assertNotEqual(exit_status(raised.exception), 0)
         self.assertIn("Canvas is installed", raised.exception.code)
         self.assertIn("nothing else on the TV was changed", raised.exception.code)
-        self.assertIn("granted no permissions", raised.exception.code)
-        self.assertEqual(len(self.tv.issued("pm install")), 1)
+        self.assertIn("not granted the location or settings permissions", raised.exception.code)
+        self.assertEqual(self.tv.issued("pm install"), ["pm install -r /data/local/tmp/canvas.apk"])  # no -g
+        self.assertEqual(self.tv.granted, set())
         for forbidden in ("pm grant", "appops set", "pm disable-user", "pm enable", "cmd package set-home-activity",
                           "settings put", "settings delete", "am force-stop", "input keyevent"):
             self.assertEqual(self.tv.issued(forbidden), [], forbidden)
@@ -787,19 +830,48 @@ class RestoreVerificationTests(TvTestCase):
 
     LET_GO = [f"pm revoke {canvas.PKG} android.permission.WRITE_SECURE_SETTINGS",
               f"appops set {canvas.PKG} WRITE_SETTINGS default",
+              *(f"pm revoke {canvas.PKG} {permission}" for permission in canvas.LOCATION),
               f"am force-stop {canvas.PKG}"]
 
     def test_restore_takes_the_permissions_back_and_stops_canvas_before_changing_anything(self):
         canvas.cmd_restore([])
         commands = self.tv.commands
-        for command in self.LET_GO:
+        for command in self.LET_GO[:-1]:
             self.assertEqual(commands.count(command), 1, command)
-        let_go = [commands.index(command) for command in self.LET_GO]
+        self.assertEqual(self.tv.granted, set())
+        let_go = [commands.index(command) for command in self.LET_GO]  # the first force-stop
         self.assertEqual(let_go, sorted(let_go))
         first_change = min(i for i, c in enumerate(commands) if c.startswith(("pm enable", "settings put",
                                                                               "settings delete")))
         self.assertLess(max(let_go), first_change)
         self.assertLess(max(let_go), min(i for i, c in enumerate(commands) if c.startswith("settings put")))
+        self.assertIn("Restored", self.stdout.getvalue())
+
+    def test_restore_leaves_canvas_stopped_although_android_relaunches_the_home_app_it_stops(self):
+        self.assertIn(canvas.PKG, self.tv.running)
+        canvas.cmd_restore([])
+        self.assertNotIn(canvas.PKG, self.tv.running)
+        commands = self.tv.commands
+        home_back = commands.index(f"cmd package set-home-activity --user 0 {STOCK_HOME}")
+        last_stop = len(commands) - 1 - commands[::-1].index(f"am force-stop {canvas.PKG}")
+        self.assertLess(home_back, last_stop)
+        self.assertLess(last_stop, commands.index(f"pidof {canvas.PKG}"))
+        self.assertIn("Restored", self.stdout.getvalue())
+
+    def test_restore_exits_non_zero_when_canvas_keeps_running(self):
+        self.tv.ignore = ("am force-stop",)
+        with self.assertRaises(SystemExit) as raised:
+            canvas.cmd_restore([])
+        self.assertNotEqual(exit_status(raised.exception), 0)
+        self.assertIn("Canvas is still running", raised.exception.code)
+        self.assertNotIn("Restored", self.stdout.getvalue())
+
+    def test_a_tv_without_pidof_does_not_fail_the_restore(self):
+        self.tv.ignore = ("am force-stop",)  # Canvas would count as running, but this TV cannot say
+        answer = self.tv._answer
+        self.tv._answer = lambda command: ("/system/bin/sh: pidof: not found" if command.startswith("pidof")
+                                           else answer(command))
+        canvas.cmd_restore([])
         self.assertIn("Restored", self.stdout.getvalue())
 
     def test_restore_with_uninstall_removes_the_app_and_still_succeeds(self):

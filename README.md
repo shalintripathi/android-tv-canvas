@@ -18,7 +18,7 @@ The Phone screen is shown with its QR code, address and PIN blacked out. The scr
 - **A photo-frame screensaver.** Your photos with a slow pan and zoom, soft crossfades, two portrait photos side by side, and a caption like "March 2023 · 3 years ago". Left and Right on the remote flip photos.
 - **Photos from your phone.** Press **Phone** on the home screen, scan the QR code, tap **Add photos**. Your phone's own photo picker opens, so there is nothing to sign in to.
 - **Edit from your phone or the TV.** Reorder the dock, hide apps, change how long each photo stays up. On the TV, hold OK on any app.
-- **Reversible.** Install backs up the TV's settings first and uninstalls nothing. `tools/canvas restore` switches the TV's own home app back on, puts the previous home screen and screensaver back, takes back the two permissions install gave Canvas, and reads the TV to check that it all took.
+- **Reversible.** Install backs up the TV's settings first and uninstalls nothing. `tools/canvas restore` switches the TV's own home app back on, puts the previous home screen and screensaver back, takes back the permissions install gave Canvas, stops it, and reads the TV to check that it all took.
 
 ## Install
 
@@ -56,10 +56,10 @@ Accept "Allow USB debugging?" on the TV when it asks. `install` then:
 1. backs up the TV's home screen, screensaver and sleep settings to `tools/backups/` on your computer;
 2. installs Canvas;
 3. asks the TV which home apps it has, and stops before switching anything off if Canvas is not one of the choices;
-4. **lists the TV's own home apps and asks you first**: `Disable these and make Canvas the home screen? [y/N]`. The default is No. If you answer No (or press Enter, Ctrl-C or Ctrl-D), Canvas stays installed, without any permissions granted, and nothing else on the TV changes. `--yes` skips the question. The list never includes Canvas, the system Settings apps, or any app that provides the system's FallbackHome safety net;
-5. after a yes, grants Canvas the two permissions it needs to change the screensaver and sleep settings (see [Privacy & security](#privacy--security)), and stops if the TV refuses;
+4. **lists the TV's own home apps and asks you first**: `Disable these and make Canvas the home screen? [y/N]`. The default is No. If you answer No (or press Enter, Ctrl-C or Ctrl-D), Canvas stays installed without the location or settings permissions, and nothing else on the TV changes. `--yes` skips the question. The list never includes Canvas, the system Settings apps, or any app that provides the system's FallbackHome safety net;
+5. after a yes, grants Canvas the two permissions it needs to change the screensaver and sleep settings (see [Privacy & security](#privacy--security)), and stops if the TV refuses, then the location permission Android requires before it tells an app the Wi-Fi network's name;
 6. switches those apps off (each one is written to the backup before it is touched) and makes Canvas the home app;
-7. checks that Canvas really became the home screen. If it did not, it switches those apps back on and says so;
+7. checks that Canvas really became the home screen. If it did not, it switches those apps back on, takes the permissions back and says so;
 8. only then sets the Canvas screensaver.
 
 If install stops part-way (the Wi-Fi drops, say), it says so, and `tools/canvas restore` undoes whatever it had done. `--app-only` installs or updates the app alone and grants nothing.
@@ -129,9 +129,9 @@ It is Android's standard throwaway debug signing key, with the public password "
 - **The phone page is served by the TV.** Whenever Canvas is running (as the home screen, that is practically always while the TV is on), the TV serves a small web page on port 8765, over plain HTTP (not HTTPS). It answers only devices on your local network, and only when they open it by the TV's address, as the QR code does. Only use it on a network you trust, not on public or shared Wi-Fi. A device that has not been paired sees only the page asking for a PIN.
 - **Pairing is by QR code or PIN.** The code on the TV expires after 10 minutes, and 5 wrong PINs void it. After 10 wrong PINs within 10 minutes, even across new codes, the TV stops accepting PINs for up to 10 minutes; the QR code still works. A paired phone gets a long random session value; the TV stores only its SHA-256 hash. You can see paired phones, and remove them, from the phone page.
 - **State-changing requests need two things:** the pairing cookie and a custom `X-Canvas` header. A web page you happen to open on your phone cannot send that header to the TV, so it cannot add or delete photos or change settings behind your back.
-- **Canvas never needs your Wi-Fi password.** It asks for the network permission to run the phone page, and for the location permission Android requires before it lets an app read the Wi-Fi network's name, which Canvas shows in the header. It does not use your location.
+- **Canvas never needs your Wi-Fi password.** It asks for the network permission to run the phone page, and for the location permission Android requires before it lets an app read the Wi-Fi network's name, which Canvas shows in the header. `tools/canvas install` grants location only after you answer yes, like the two settings permissions below. It does not use your location.
 - **Two powerful permissions, granted by `tools/canvas install`.** `WRITE_SECURE_SETTINGS` lets an app write to the TV's system-wide Secure settings, which is far more than Canvas needs. Canvas uses it only for the screensaver and sleep settings (`screensaver_components`, `screensaver_enabled`, `screensaver_activate_on_sleep` and `sleep_timeout`). `WRITE_SETTINGS`, granted through `appops`, lets an app write the System settings; Canvas uses it only for the screen-off timeout (`screen_off_timeout`). The grants are on the Canvas package alone, are made only after you answer yes in `install`, and go away when you run `tools/canvas restore` or uninstall Canvas.
-- **Install and debloat are reversible.** Install keeps a backup in `tools/backups/` on your computer. `tools/canvas restore` undoes install, including taking back the two permissions and stopping Canvas, and `tools/canvas undebloat <list>` undoes debloat. Nothing is ever uninstalled except by `restore --uninstall`, which removes Canvas itself.
+- **Install and debloat are reversible.** Install keeps a backup in `tools/backups/` on your computer. `tools/canvas restore` undoes install, including taking back the permissions and stopping Canvas, and `tools/canvas undebloat <list>` undoes debloat. Nothing is ever uninstalled except by `restore --uninstall`, which removes Canvas itself.
 
 ## Compared with
 

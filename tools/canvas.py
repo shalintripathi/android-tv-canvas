@@ -58,6 +58,8 @@ SHOTS = os.path.join(ROOT, "shots")
 PKG = "io.github.shalintripathi.canvas"
 HOME = PKG + "/.home.HomeActivity"
 DREAM = PKG + "/.frame.FrameDreamService"
+# Android 10+ tells an app the Wi-Fi network's name only if it holds location. Canvas shows the name in its header.
+LOCATION = ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"]
 # Home apps that `install` never disables: Canvas itself, and the system Settings apps, whose FallbackHome is
 # the TV's safety net when no other home app is enabled. Any other package with a FallbackHome (a vendor's own
 # Settings, say) is kept too: see stock_homes.
@@ -500,19 +502,32 @@ def confirm_switch_off(stock, yes, ask):
     except (EOFError, KeyboardInterrupt):
         answer = ""
     if answer.strip().lower() not in ("y", "yes"):
-        sys.exit("\nStopped. Canvas is installed, but nothing else on the TV was changed: it was granted no "
-                 "permissions, and the home screen, the home app(s) above and the screensaver are as they were. "
+        sys.exit("\nStopped. Canvas is installed, but nothing else on the TV was changed: it was not granted the "
+                 "location or settings permissions, and the home screen, the home app(s) above and the screensaver "
+                 "are as they were. "
                  "Run the install again and answer y, or add --yes, to go on.")
 
 
+def take_permissions_back(dev):
+    """Undo every grant make_canvas_home makes. Revoking location also stops Canvas, if it is running."""
+    run(dev, f"pm revoke {PKG} android.permission.WRITE_SECURE_SETTINGS")
+    run(dev, f"appops set {PKG} WRITE_SETTINGS default")
+    for permission in LOCATION:
+        run(dev, f"pm revoke {PKG} {permission}")
+
+
 def make_canvas_home(dev, path, stock):
-    """After the yes: grant the two permissions, switch the TV's own home apps off, check that Canvas won, and only
-    then set the screensaver. If Canvas did not win, the apps switched off by this run are switched back on."""
+    """After the yes: grant the permissions, switch the TV's own home apps off, check that Canvas won, and only
+    then set the screensaver. If Canvas did not win, the apps switched off by this run are switched back on and
+    the permissions are taken back."""
     grant = run(dev, f"pm grant {PKG} android.permission.WRITE_SECURE_SETTINGS")
     if grant:  # a successful grant prints nothing
         sys.exit("Canvas could not be granted WRITE_SECURE_SETTINGS, so it cannot set the screensaver. "
                  "The app is installed, but the home screen and screensaver were not changed.")
     run(dev, f"appops set {PKG} WRITE_SETTINGS allow")
+    for permission in LOCATION:
+        if run(dev, f"pm grant {PKG} {permission}"):
+            print("Canvas could not be granted location, so its header will not show the Wi-Fi network's name.")
     with open(path) as f:
         backup = json.load(f)
     run(dev, f"cmd package set-home-activity --user 0 {HOME}")
@@ -532,12 +547,13 @@ def make_canvas_home(dev, path, stock):
         backup["disabled_by_canvas"] = [p for p in backup["disabled_by_canvas"] if p not in disabled_now]
         backup["disabled_by_canvas"] += stuck  # still disabled, so `restore` must still know about them
         save_backup(path, backup)
+        take_permissions_back(dev)
         if stuck:
             sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}), and "
                      f"{', '.join(stuck)} could not be re-enabled. Run `tools/canvas restore`.")
         sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}). "
-                 f"Re-enabled the TV's own home app ({', '.join(disabled_now) or 'none had been disabled'}). "
-                 "The screensaver and other settings were not changed.")
+                 f"Re-enabled the TV's own home app ({', '.join(disabled_now) or 'none had been disabled'}) and "
+                 "took back Canvas's permissions. The screensaver and other settings were not changed.")
     run(dev, f"settings put secure screensaver_components {DREAM}")
     run(dev, "settings put secure screensaver_enabled 1")
     run(dev, "settings put secure screensaver_activate_on_sleep 1")
@@ -554,7 +570,7 @@ def cmd_install(args, ask=None):
         path = take_backup(dev)
         print(f"Uploading {os.path.relpath(apk, ROOT)}…")
         push(dev, apk, "/data/local/tmp/canvas.apk")
-        out = run(dev, "pm install -r -g /data/local/tmp/canvas.apk")
+        out = run(dev, "pm install -r /data/local/tmp/canvas.apk")  # no -g: permissions only after the yes
         sh(dev, "rm -f /data/local/tmp/canvas.apk")
         if "Success" not in out:
             hint = ("\nThe installed copy was signed with a different key (debug and release builds are). To switch "
@@ -602,6 +618,8 @@ def check_restored(dev, backup, packages):
             unset = value in ("", "null")
             if (got not in ("", "null")) if unset else (got != value):
                 problems.append(f"{table} {key} is {got!r}, the backup says {value!r}")
+    if re.fullmatch(r"\d+( \d+)*", sh(dev, f"pidof {PKG}")):  # process ids; a TV without pidof says "not found"
+        problems.append("Canvas is still running, so its phone page is still on the network")
     return problems
 
 
@@ -614,9 +632,8 @@ def cmd_restore(args):
             backup = json.load(f)
         if "--uninstall" not in args:
             # Canvas puts itself back as the screensaver at boot and on its home screen while it can write the
-            # settings, and its phone page runs while it runs. Take both permissions back and stop it first.
-            run(dev, f"pm revoke {PKG} android.permission.WRITE_SECURE_SETTINGS")
-            run(dev, f"appops set {PKG} WRITE_SETTINGS default")
+            # settings, and its phone page runs while it runs. Take the permissions back and stop it first.
+            take_permissions_back(dev)
             run(dev, f"am force-stop {PKG}")  # stopped: no BOOT_COMPLETED until something launches it again
         # Also re-enable the two home apps older installs disabled by name, in case one stopped before it recorded
         # them, but not one that was already off before Canvas came. Backups from before `disabled_before` existed
@@ -635,6 +652,10 @@ def cmd_restore(args):
             run(dev, f"cmd package set-home-activity --user 0 {home}")
         if "--uninstall" in args:
             run(dev, f"pm uninstall {PKG}")
+        else:
+            # Android relaunches the home app it is asked to stop, so the stop above did not hold while Canvas was
+            # still the home screen. The TV's own home is back now: stop Canvas again.
+            run(dev, f"am force-stop {PKG}")
         problems = check_restored(dev, backup, packages)
         if problems:
             sys.exit("Restore did not take effect on the TV:\n  - " + "\n  - ".join(problems)
