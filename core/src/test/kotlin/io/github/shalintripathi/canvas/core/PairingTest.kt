@@ -91,4 +91,31 @@ class PairingTest {
         assertEquals("Android phone", Pairing.deviceLabel("Mozilla/5.0 (Linux; Android 15; Pixel 9)"))
         assertEquals("Browser", Pairing.deviceLabel(null))
     }
+
+    @Test
+    fun twoPhonesCanShareOneCode() {
+        val code = pairing.newCode()
+        val a = pairing.pairWithToken(code.token, "Phone A")
+        val bResult = pairing.pairWithPin(code.pin, "Phone B")
+        val c = pairing.pairWithToken(code.token, "Phone C")
+        assertNotNull(a)
+        assertTrue(bResult is Pairing.PinResult.Paired)
+        assertNotNull(c)
+        val b = (bResult as Pairing.PinResult.Paired).session
+        assertEquals(3, setOf(a, b, c).size)
+        assertTrue(pairing.isPaired(a))
+        assertTrue(pairing.isPaired(b))
+        assertTrue(pairing.isPaired(c))
+        assertEquals(3, pairing.phones().size)
+    }
+
+    @Test
+    fun sessionsAreLongRandomHex() {
+        val code = pairing.newCode()
+        val byToken = pairing.pairWithToken(code.token, "x")
+        val byPin = (pairing.pairWithPin(code.pin, "y") as Pairing.PinResult.Paired).session
+        assertNotNull(byToken)
+        assertTrue(byToken!!.matches(Regex("[0-9a-f]{64}")))
+        assertTrue(byPin.matches(Regex("[0-9a-f]{64}")))
+    }
 }
