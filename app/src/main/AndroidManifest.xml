@@ -27,6 +27,7 @@
         <package android:name="com.tcl.tv" />
         <package android:name="com.sony.dtv.tvx" />
         <package android:name="com.google.android.tv" />
+        <package android:name="com.google.android.apps.tv.dreamx" />
     </queries>
 
     <application
@@ -37,6 +38,11 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Canvas">
+
+        <!-- Exported so ADB can open it for testing; it only shows a pairing code on the TV. -->
+        <activity
+            android:name=".phone.PhoneActivity"
+            android:exported="true" />
 
         <receiver
             android:name=".settings.BootReceiver"

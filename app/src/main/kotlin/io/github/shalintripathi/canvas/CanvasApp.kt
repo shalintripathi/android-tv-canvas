@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import io.github.shalintripathi.canvas.apps.AppRepository
 import io.github.shalintripathi.canvas.library.PhotoLibrary
+import io.github.shalintripathi.canvas.phone.CompanionServer
 import io.github.shalintripathi.canvas.settings.Prefs
 import io.github.shalintripathi.canvas.settings.SystemSettings
 
@@ -16,6 +17,8 @@ class CanvasApp : Application() {
         private set
     lateinit var library: PhotoLibrary
         private set
+    lateinit var server: CompanionServer
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -24,6 +27,8 @@ class CanvasApp : Application() {
         apps = AppRepository(this)
         library = PhotoLibrary(this)
         system.rememberPrevious(prefs)
+        server = CompanionServer(this)
+        server.start()
     }
 }
 

@@ -34,8 +34,16 @@ class SystemSettings(private val context: Context) {
 
     fun restorePrevious(prefs: Prefs): Boolean {
         if (!canWriteSecure()) return false
-        val previous = prefs.previousScreensaver
+        // Android 12 hides screensaver_components from apps, so the TV's own one is often unknown: use Google TV's.
+        val previous = prefs.previousScreensaver ?: GOOGLE_TV_SCREENSAVER.takeIf { isInstalled(GOOGLE_TV_PACKAGE) }
         return if (previous != null) putSecure(SCREENSAVER_COMPONENTS, previous) else putSecure(SCREENSAVER_ENABLED, "0")
+    }
+
+    private fun isInstalled(pkg: String): Boolean = try {
+        context.packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (e: PackageManager.NameNotFoundException) {
+        false
     }
 
     /** Called at startup: note the TV's own screensaver once, before Canvas replaces it. */
@@ -90,5 +98,7 @@ class SystemSettings(private val context: Context) {
         private const val SCREENSAVER_ENABLED = "screensaver_enabled"
         private const val SCREENSAVER_ON_SLEEP = "screensaver_activate_on_sleep"
         private const val SLEEP_TIMEOUT = "sleep_timeout"
+        private const val GOOGLE_TV_PACKAGE = "com.google.android.apps.tv.dreamx"
+        private const val GOOGLE_TV_SCREENSAVER = "$GOOGLE_TV_PACKAGE/.service.Backdrop"
     }
 }
