@@ -30,6 +30,9 @@ import canvas  # noqa: E402
 
 LAUNCHERX, WRAITH = canvas.STOCK_HOMES
 STOCK_HOME = LAUNCHERX + "/.home.HomeActivity"
+WRAITH_HOME = WRAITH + "/.RecoveryActivity"
+FALLBACK_HOME = "com.android.tv.settings/.system.FallbackHome"
+VENDOR_HOME = "com.vendor.launcher/.Home"
 STOCK_DREAM = "com.google.android.apps.tv.dreamx/.service.Backdrop"
 RESOLVER = "android/com.android.internal.app.ResolverActivity"
 
@@ -53,7 +56,10 @@ class FakeTV:
                          ("system", "screen_off_timeout"): "600000"}
         self.commands = []
         self.closed = False
-        self.canvas_can_be_home = True  # False: the build has no HOME activity, so set-home-activity fails
+        self.canvas_can_be_home = True  # False: the build has no HOME activity, so the TV does not list it
+        self.stock_outranks = True  # Google TV: the stock launcher wins home resolution over a preferred Canvas
+        self.vendor_launcher = False  # True: another launcher install does not disable also outranks Canvas
+        self.preferred = STOCK_HOME  # what `cmd package set-home-activity` last set
         self.grant_output = ""
         self.fail_on = None  # raise when a command contains this text (the ADB link dropped)
         self.ignore = ()  # commands starting with one of these do nothing, as if the TV refused them
@@ -73,6 +79,30 @@ class FakeTV:
     def issued(self, prefix):
         return [c for c in self.commands if c.startswith(prefix)]
 
+    def _home_candidates(self):
+        """The HOME activities of installed, enabled packages with their priorities, highest first."""
+        everything = [(5, VENDOR_HOME), (2, STOCK_HOME), (1, WRAITH_HOME), (0, canvas.HOME), (-1000, FALLBACK_HOME)]
+        found = []
+        for priority, component in everything:
+            pkg = component.split("/")[0]
+            if component == canvas.HOME and not self.canvas_can_be_home:
+                continue
+            if component == VENDOR_HOME and not self.vendor_launcher:
+                continue
+            if pkg in canvas.STOCK_HOMES and not self.packages.get(pkg):
+                continue  # not installed, or disabled
+            found.append((priority, component))
+        return found
+
+    def _resolve_home(self):
+        """What resolve-activity answers. A preferred home wins only if nothing outranks it; Google TV's does."""
+        components = [component for _, component in self._home_candidates()]
+        top = components[0]
+        if self.preferred in components and (top == canvas.HOME or not self.stock_outranks):
+            self.home = self.preferred
+        else:
+            self.home = top
+
     def _answer(self, command):
         if self.ignore and command.startswith(self.ignore):
             return ""
@@ -83,6 +113,13 @@ class FakeTV:
             return "BRAVIA BF1"
         if command.startswith("cmd package resolve-activity"):
             return "priority=0 preferredOrder=0\n" + self.home if self.home else ""
+        if command.startswith("cmd package query-activities"):
+            found = self._home_candidates()
+            lines = [f"{len(found)} activities found:"]
+            for i, (priority, component) in enumerate(found):
+                lines += [f"  Activity #{i}:", f"    priority={priority} preferredOrder=0 match=0x108000 isDefault=true",
+                          f"    {component}"]
+            return "\n".join(lines)
         if command.startswith("settings get"):
             return self.settings.get((words[2], words[3]), "null")
         if command.startswith("pm list packages -d"):
@@ -104,13 +141,16 @@ class FakeTV:
                 return "Error: no such activity"
             if self.packages.get(package) is False:
                 return "Error: the package is disabled"
-            self.home = component
+            self.preferred = component
+            self._resolve_home()
             return "Success"
         if command.startswith("pm disable-user"):
             self.packages[words[-1]] = False
+            self._resolve_home()
             return f"Package {words[-1]} new state: disabled-user"
         if command.startswith("pm enable"):
             self.packages[words[-1]] = True
+            self._resolve_home()
             return f"Package {words[-1]} new state: enabled"
         if command.startswith("settings put"):
             self.settings[(words[2], words[3])] = words[4]
@@ -209,19 +249,92 @@ class BackupBeforeDisableTests(TvTestCase):
 
 
 class InstallSafetyTests(TvTestCase):
-    """Finding 2: Canvas must be able to serve as home before anything is disabled."""
+    """Canvas must be a HOME candidate before anything is disabled, and must really win once the stock ones are."""
 
-    def test_install_aborts_before_any_disable_when_home_does_not_switch(self):
+    def test_install_aborts_before_any_disable_when_the_tv_does_not_list_canvas_as_a_home(self):
         self.tv.canvas_can_be_home = False
         with self.assertRaises(SystemExit) as raised:
             self.install()
         self.assertNotEqual(exit_status(raised.exception), 0)
-        self.assertIn("did not become the home screen", raised.exception.code)
-        self.assertEqual(self.tv.issued("pm disable-user"), [])
-        self.assertEqual(self.tv.issued("settings put"), [])
+        self.assertIn("does not list Canvas as a home screen", raised.exception.code)
+        self.assertEqual(len(self.tv.issued("cmd package query-activities")), 1)
+        for forbidden in ("pm disable-user", "pm enable", "cmd package set-home-activity", "settings put",
+                          "input keyevent"):
+            self.assertEqual(self.tv.issued(forbidden), [], forbidden)
         self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True})
         self.assertEqual(self.tv.home, STOCK_HOME)
         self.assertEqual(self.backup()["disabled_by_canvas"], [])
+
+    def test_stock_launcher_outranks_canvas_until_it_is_disabled(self):
+        """The FakeTV behaves like the real TV: this is why the old check-before-disabling could never pass."""
+        self.tv.shell("cmd package set-home-activity --user 0 " + canvas.HOME)
+        self.assertEqual(self.tv.home, STOCK_HOME)
+        self.tv.shell(f"pm disable-user --user 0 {LAUNCHERX}")
+        self.assertEqual(self.tv.home, WRAITH_HOME)
+        self.tv.shell(f"pm disable-user --user 0 {WRAITH}")
+        self.assertEqual(self.tv.home, canvas.HOME)
+
+    def test_a_good_full_install_disables_both_stock_homes_verifies_and_only_then_sets_the_screensaver(self):
+        self.install()
+        commands = self.tv.commands
+
+        def first(prefix):
+            return min(i for i, c in enumerate(commands) if c.startswith(prefix))
+
+        def last(prefix):
+            return max(i for i, c in enumerate(commands) if c.startswith(prefix))
+
+        self.assertEqual(self.tv.issued("pm disable-user"),
+                         [f"pm disable-user --user 0 {LAUNCHERX}", f"pm disable-user --user 0 {WRAITH}"])
+        self.assertEqual(len(self.tv.issued("cmd package set-home-activity")), 2)
+        self.assertLess(first("cmd package query-activities"), first("cmd package set-home-activity"))
+        self.assertLess(first("cmd package set-home-activity"), first("pm disable-user"))
+        self.assertLess(last("pm disable-user"), last("cmd package set-home-activity"))
+        verify = last("cmd package resolve-activity")
+        self.assertLess(last("cmd package set-home-activity"), verify)
+        self.assertLess(verify, first("settings put"))
+        self.assertLess(first("settings put"), first("input keyevent"))
+        self.assertEqual(self.tv.issued("pm enable"), [])
+        self.assertEqual(self.tv.home, canvas.HOME)
+        self.assertEqual(self.backup()["disabled_by_canvas"], [LAUNCHERX, WRAITH])
+
+    def test_a_home_mismatch_after_disabling_re_enables_exactly_the_packages_disabled_this_run(self):
+        self.tv.vendor_launcher = True  # something else outranks Canvas, so disabling the stock ones is not enough
+        with self.assertRaises(SystemExit) as raised:
+            self.install()
+        self.assertNotEqual(exit_status(raised.exception), 0)
+        self.assertIn("did not become the home screen", raised.exception.code)
+        self.assertIn(VENDOR_HOME, raised.exception.code)
+        self.assertIn("Re-enabled the stock launcher", raised.exception.code)
+        self.assertEqual(self.tv.issued("pm disable-user"),
+                         [f"pm disable-user --user 0 {LAUNCHERX}", f"pm disable-user --user 0 {WRAITH}"])
+        self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {LAUNCHERX}", f"pm enable {WRAITH}"])
+        self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: True})
+        self.assertEqual(self.backup()["disabled_by_canvas"], [])
+        for forbidden in ("settings put", "am force-stop", "input keyevent"):
+            self.assertEqual(self.tv.issued(forbidden), [], forbidden)
+        self.assertEqual(self.tv.settings[("secure", "screensaver_components")], STOCK_DREAM)
+
+    def test_a_rollback_leaves_packages_an_earlier_run_disabled_alone(self):
+        self.tv.packages[WRAITH] = False
+        self.stock_backup(disabled_by_canvas=[WRAITH])
+        self.tv.vendor_launcher = True
+        with self.assertRaises(SystemExit):
+            self.install()
+        self.assertEqual(self.tv.issued("pm disable-user"), [f"pm disable-user --user 0 {LAUNCHERX}"])
+        self.assertEqual(self.tv.issued("pm enable"), [f"pm enable {LAUNCHERX}"])
+        self.assertEqual(self.tv.packages, {LAUNCHERX: True, WRAITH: False})
+        self.assertEqual(self.backup()["disabled_by_canvas"], [WRAITH])
+
+    def test_a_rollback_that_cannot_re_enable_keeps_the_package_in_the_backup_and_says_so(self):
+        self.tv.vendor_launcher = True
+        self.tv.ignore = ("pm enable",)
+        with self.assertRaises(SystemExit) as raised:
+            self.install()
+        self.assertNotEqual(exit_status(raised.exception), 0)
+        self.assertIn("could not be re-enabled", raised.exception.code)
+        self.assertIn("tools/canvas restore", raised.exception.code)
+        self.assertEqual(self.backup()["disabled_by_canvas"], [LAUNCHERX, WRAITH])
 
     def test_full_install_stops_before_touching_the_home_when_the_grant_fails(self):
         self.tv.grant_output = ("Exception occurred while executing 'grant':\n"
@@ -268,6 +381,7 @@ class RestoreVerificationTests(TvTestCase):
         self.assertEqual(len(self.tv.issued("input keyevent")), 1)
 
     def test_restore_exits_non_zero_when_the_home_screen_does_not_come_back(self):
+        self.tv.stock_outranks = False  # a TV where re-enabling the stock launcher alone would not take the home back
         self.tv.ignore = ("cmd package set-home-activity",)
         with self.assertRaises(SystemExit) as raised:
             canvas.cmd_restore([])

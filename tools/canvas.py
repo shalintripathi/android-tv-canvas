@@ -332,6 +332,13 @@ def current_home(dev):
     return out.splitlines()[-1].strip() if out else ""
 
 
+def canvas_is_home_candidate(dev):
+    """True if the TV lists Canvas's HomeActivity among the HOME activities (whichever one currently wins)."""
+    out = sh(dev, "cmd package query-activities --brief -a android.intent.action.MAIN "
+                  "-c android.intent.category.HOME")
+    return any(same_component(line, HOME) for line in out.splitlines() if "/" in line and " " not in line.strip())
+
+
 def installed(dev, pkg):
     return f"package:{pkg}" in sh(dev, f"pm list packages {pkg}").split()
 
@@ -424,20 +431,37 @@ def cmd_install(args):
             print("Installed (app only).")
             return
 
+        # Google TV's launcher outranks every other HOME activity, so Canvas can only become Home once the stock
+        # launchers are disabled. Check that Canvas is a candidate, disable them, then check Canvas really won.
+        if not canvas_is_home_candidate(dev):
+            sys.exit("The TV does not list Canvas as a home screen (no HOME activity for "
+                     f"{HOME} in `cmd package query-activities`). Nothing was disabled or changed.")
         with open(path) as f:
             backup = json.load(f)
         run(dev, f"cmd package set-home-activity --user 0 {HOME}")
-        home = current_home(dev)
-        if not same_component(home, HOME):
-            sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}). "
-                     "The stock launchers were left enabled and nothing else was changed.")
+        disabled_now = []
         for pkg in STOCK_HOMES:
             if installed(dev, pkg) and enabled(dev, pkg):
                 if pkg not in backup["disabled_by_canvas"]:
                     backup["disabled_by_canvas"].append(pkg)
                 save_backup(path, backup)  # on disk before the disable, so a failure part-way can still be undone
                 run(dev, f"pm disable-user --user 0 {pkg}")
+                disabled_now.append(pkg)
         run(dev, f"cmd package set-home-activity --user 0 {HOME}")
+        home = current_home(dev)
+        if not same_component(home, HOME):
+            for pkg in disabled_now:
+                run(dev, f"pm enable {pkg}")
+            stuck = [pkg for pkg in disabled_now if not enabled(dev, pkg)]
+            backup["disabled_by_canvas"] = [p for p in backup["disabled_by_canvas"] if p not in disabled_now]
+            backup["disabled_by_canvas"] += stuck  # still disabled, so `restore` must still know about them
+            save_backup(path, backup)
+            if stuck:
+                sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}), and "
+                         f"{', '.join(stuck)} could not be re-enabled. Run `tools/canvas restore`.")
+            sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}). "
+                     f"Re-enabled the stock launcher ({', '.join(disabled_now) or 'none had been disabled'}). "
+                     "The screensaver and other settings were not changed.")
         run(dev, f"settings put secure screensaver_components {DREAM}")
         run(dev, "settings put secure screensaver_enabled 1")
         run(dev, "settings put secure screensaver_activate_on_sleep 1")
