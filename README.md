@@ -66,9 +66,9 @@ If install stops part-way (the Wi-Fi drops, say), it says so, and `tools/canvas 
 
 Press Home on the remote when it finishes.
 
-**Undo everything:** `tools/canvas restore --uninstall`.
+**Undo everything:** `tools/canvas restore --uninstall`. This also uninstalls Canvas, which deletes the photos added from phones; plain `tools/canvas restore` puts the TV back but keeps the app and its photos.
 
-**Using Claude Code?** Open it in this folder and say: *"Install Canvas on my TV and make it the home screen."* It can follow these steps with `tools/canvas`. Because `install` asks before it switches off the TV's own home app, Claude Code will show you that list and ask you first, and only then run it again with `--yes`.
+**Using Claude Code?** Open it in this folder and say: *"Install Canvas on my TV and make it the home screen."* It can follow these steps with `tools/canvas`. Because `install` asks before it switches off the TV's own home app, Claude Code is instructed (see [AGENTS.md](AGENTS.md)) to show you that list and ask first, and only then run it again with `--yes`.
 
 ### Remove preinstalled apps (you choose)
 
@@ -87,9 +87,9 @@ Nothing is uninstalled. Apps are only switched off for the main user, and `tools
 
 | TV | Android | Status |
 |---|---|---|
-| Sony BRAVIA (BF1) | 12, Google TV | Home screen, screensaver and phone page work, with photos added from an iPhone. `install` and `restore` were exercised on it with an earlier version that switched off Google TV's two home apps by name; the generic home-app detection that replaced it is new and so far tested offline only. `debloat` has been applied for the "Sony promos" group only. |
+| Sony BRAVIA (BF1) | 12, Google TV | Home screen, screensaver and phone page work, with photos added from an iPhone. `install` was exercised on it with an earlier version that switched off Google TV's two home apps by name; the generic home-app detection that replaced it is new and so far tested offline only. `restore` has only been tested offline and has not yet run on a TV. `debloat` has been applied for the "Sony promos" group only. |
 
-Not yet checked on a TV: the generic home-app detection and the new question in `install`, Canvas's start-up time and memory use, whether the remote's voice button still behaves as before once the TV's own home app is off, the Left and Right keys during the screensaver, the screensaver staying away while a video plays, and adding photos from an Android phone.
+Not yet checked on a TV: `restore`, the generic home-app detection and the new question in `install`, the phone page's local-network checks, Canvas's start-up time and memory use, whether the remote's voice button still behaves as before once the TV's own home app is off, the Left and Right keys during the screensaver, the screensaver staying away while a video plays, and adding photos from an Android phone.
 
 **Expected to work, but untested.** Canvas needs Android 7.0 (API 24) or newer. These should work:
 
@@ -126,8 +126,8 @@ It is Android's standard throwaway debug signing key, with the public password "
 ## Privacy & security
 
 - **No account, no cloud.** Canvas does not sign in to anything and does not send your photos, settings or usage anywhere. Photos are stored on the TV.
-- **The phone page is served by the TV.** When you open the Phone screen, the TV serves a small web page on port 8765 of your home network, over plain HTTP (not HTTPS). Only use it on a network you trust, not on public or shared Wi-Fi. Without pairing, a device on your network sees only a page asking for a PIN.
-- **Pairing is by QR code or PIN.** The code on the TV expires after 10 minutes, and 5 wrong PINs void it. A paired phone gets a long random session value; the TV stores only its SHA-256 hash. You can see paired phones, and remove them, from the phone page.
+- **The phone page is served by the TV.** Whenever Canvas is running (as the home screen, that is practically always while the TV is on), the TV serves a small web page on port 8765, over plain HTTP (not HTTPS). It answers only devices on your local network, and only when they open it by the TV's address, as the QR code does. Only use it on a network you trust, not on public or shared Wi-Fi. A device that has not been paired sees only the page asking for a PIN.
+- **Pairing is by QR code or PIN.** The code on the TV expires after 10 minutes, and 5 wrong PINs void it. After 10 wrong PINs within 10 minutes, even across new codes, the TV stops accepting PINs for up to 10 minutes; the QR code still works. A paired phone gets a long random session value; the TV stores only its SHA-256 hash. You can see paired phones, and remove them, from the phone page.
 - **State-changing requests need two things:** the pairing cookie and a custom `X-Canvas` header. A web page you happen to open on your phone cannot send that header to the TV, so it cannot add or delete photos or change settings behind your back.
 - **Canvas never needs your Wi-Fi password.** It asks for the network permission to run the phone page, and for the location permission Android requires before it lets an app read the Wi-Fi network's name, which Canvas shows in the header. It does not use your location.
 - **Two powerful permissions, granted by `tools/canvas install`.** `WRITE_SECURE_SETTINGS` lets an app write to the TV's system-wide Secure settings, which is far more than Canvas needs. Canvas uses it only for the screensaver and sleep settings (`screensaver_components`, `screensaver_enabled`, `screensaver_activate_on_sleep` and `sleep_timeout`). `WRITE_SETTINGS`, granted through `appops`, lets an app write the System settings; Canvas uses it only for the screen-off timeout (`screen_off_timeout`). The grants are on the Canvas package alone, are made only after you answer yes in `install`, and go away when you run `tools/canvas restore` or uninstall Canvas.
@@ -155,8 +155,10 @@ The full design is in [docs/specs/2026-11-01-canvas-design.md](docs/specs/2026-1
 
 Every push builds a debug APK in GitHub Actions. To use one: `tools/fetch-ci-apk.sh` (needs the `gh` command line tool), then `tools/canvas install build/ci/app-debug.apk`. Locally, with JDK 17 and the Android SDK: `./gradlew test assembleDebug`. The tests for the tools need no TV: `tools/venv/bin/python -I -m unittest discover -s tools -p 'test_canvas.py'` (the `venv` folder appears the first time you run `tools/canvas`).
 
-A debug build and a release build are signed with different keys, so Android will not update one with the other. To switch, remove the installed one first with `tools/canvas sh pm uninstall io.github.shalintripathi.canvas`; this deletes the photos added so far.
+A debug build and a release build are signed with different keys, so Android will not update one with the other. To switch, run `tools/canvas restore --uninstall`, then `tools/canvas install <apk>` with the other build. Uninstalling deletes the photos added from phones.
 
 ## Credits
 
 Canvas started from [mihirgupta0900/tv-home](https://github.com/mihirgupta0900/tv-home) (MIT), which also supplied the built-in wallpapers (Wikimedia Commons, CC BY-SA; see [WALLPAPER-CREDITS.md](WALLPAPER-CREDITS.md)). Code is MIT, see [LICENSE](LICENSE).
+
+QR codes: [ZXing](https://github.com/zxing/zxing) (Apache-2.0).

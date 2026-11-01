@@ -557,8 +557,9 @@ def cmd_install(args, ask=None):
         out = run(dev, "pm install -r -g /data/local/tmp/canvas.apk")
         sh(dev, "rm -f /data/local/tmp/canvas.apk")
         if "Success" not in out:
-            hint = (f"\nThe installed copy was signed with a different key. Remove it first:"
-                    f" tools/canvas sh pm uninstall {PKG}") if "UPDATE_INCOMPATIBLE" in out else ""
+            hint = ("\nThe installed copy was signed with a different key (debug and release builds are). To switch "
+                    "builds, run `tools/canvas restore --uninstall`, then `tools/canvas install <apk>`. Uninstalling "
+                    "deletes the photos added from phones.") if "UPDATE_INCOMPATIBLE" in out else ""
             sys.exit("Install failed." + hint)
         if app_only:  # grants nothing: the ones an earlier full install made survive `pm install -r`
             print("Installed (app only).")

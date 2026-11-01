@@ -74,6 +74,7 @@ class FakeTV:
         self.homes = {STOCK_HOME: 2, WRAITH_HOME: 1, canvas.HOME: 0, FALLBACK_HOME: -1000}  # HOME activity -> priority
         self.preferred = STOCK_HOME  # what `cmd package set-home-activity` last set
         self.grant_output = ""
+        self.install_output = "Success"  # what `pm install` prints
         self.fail_on = None  # raise when a command contains this text (the ADB link dropped)
         self.ignore = ()  # commands starting with one of these do nothing, as if the TV refused them
         self.on_command = None  # called with each command before it is answered
@@ -158,7 +159,7 @@ class FakeTV:
             pkg = words[-1]
             return f"package:{pkg}" if pkg in self.packages else ""
         if command.startswith("pm install"):
-            return "Success"
+            return self.install_output
         if command.startswith(("rm ", "am force-stop", "input keyevent", "appops set")):
             return ""
         if command.startswith("pm grant"):
@@ -483,6 +484,17 @@ class InstallSafetyTests(TvTestCase):
         self.assertIn("Installed (app only).", self.stdout.getvalue())
         for forbidden in ("pm grant", "appops set", "cmd package set-home-activity", "pm disable-user",
                           "settings put"):
+            self.assertEqual(self.tv.issued(forbidden), [], forbidden)
+
+    def test_a_build_signed_with_another_key_says_how_to_switch_builds(self):
+        self.tv.install_output = ("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package "
+                                  f"{canvas.PKG} signatures do not match newer version; ignoring!]")
+        with self.assertRaises(SystemExit) as raised:
+            self.install()
+        self.assertIn("Install failed.", raised.exception.code)
+        self.assertIn("`tools/canvas restore --uninstall`, then `tools/canvas install <apk>`", raised.exception.code)
+        self.assertIn("deletes the photos", raised.exception.code)
+        for forbidden in ("pm grant", "pm uninstall", "pm disable-user", "settings put"):
             self.assertEqual(self.tv.issued(forbidden), [], forbidden)
 
     def test_a_good_full_install_makes_canvas_home_and_disables_the_stock_homes(self):
