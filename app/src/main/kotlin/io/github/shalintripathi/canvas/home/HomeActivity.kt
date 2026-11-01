@@ -72,6 +72,7 @@ class HomeActivity : Activity() {
     private var glowAnim: ValueAnimator? = null
     private var lastFocusedPkg: String? = null
     private var lastFocusedPill = View.NO_ID
+    private var rebuilding = false
     private var firstShow = true
     private var popup: PopupWindow? = null
 
@@ -137,13 +138,23 @@ class HomeActivity : Activity() {
     }
 
     override fun onNewIntent(intent: Intent) {
+        // Read this before super: Home arrives here from any app, but only "Home pressed while already home"
+        // (this window has focus and was not just brought forward) goes back to the first dock app.
+        val alreadyOnHome = hasWindowFocus() && (intent.flags and Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT) == 0
         super.onNewIntent(intent)
-        // Home pressed while already home: back to the first dock app.
         popup?.dismiss()
-        lastFocusedPkg = null
-        lastFocusedPill = View.NO_ID
-        (dockCards.firstOrNull() ?: gridCards.firstOrNull())?.requestFocus()
-        scroll.smoothScrollTo(0, 0)
+        if (alreadyOnHome) {
+            lastFocusedPkg = null
+            lastFocusedPill = View.NO_ID
+            (dockCards.firstOrNull() ?: gridCards.firstOrNull())?.requestFocus()
+            scroll.smoothScrollTo(0, 0)
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // A rebuild, or a start while the TV was in touch mode, can leave nothing focused: put the focus back.
+        if (hasFocus && currentFocus == null) restoreFocus()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -245,6 +256,22 @@ class HomeActivity : Activity() {
     // ---------------------------------------------------------------- apps
 
     private fun buildApps() {
+        // Removing the focused tile makes the framework focus the first view (the Inputs pill), and the focus
+        // listeners would then remember that. Keep what was remembered and put the focus back once laid out.
+        val keptPkg = lastFocusedPkg
+        val keptPill = lastFocusedPill
+        rebuilding = true
+        try {
+            rebuildTiles()
+        } finally {
+            rebuilding = false
+        }
+        lastFocusedPkg = keptPkg
+        lastFocusedPill = keptPill
+        content.post { restoreFocus() }
+    }
+
+    private fun rebuildTiles() {
         val repo = app.apps
         repo.markSeen()
         val apps = repo.load(repo.excludedPackages())
@@ -293,7 +320,6 @@ class HomeActivity : Activity() {
             title.text = first.label
             setGlow(first.color)
         }
-        restoreFocus()
     }
 
     /** A 16:9 card with the app's banner; grid tiles show the app's name while focused. */
@@ -371,6 +397,7 @@ class HomeActivity : Activity() {
     }
 
     private fun onTileFocused(info: AppInfo, inDock: Boolean, box: View) {
+        if (rebuilding) return
         lastFocusedPkg = info.pkg
         lastFocusedPill = View.NO_ID
         if (inDock) {
@@ -387,6 +414,7 @@ class HomeActivity : Activity() {
     }
 
     private fun onPillFocused(pill: View) {
+        if (rebuilding) return
         lastFocusedPill = pill.id
         lastFocusedPkg = null
         scroll.smoothScrollTo(0, 0)
@@ -416,7 +444,7 @@ class HomeActivity : Activity() {
             c.nextFocusUpId = topId
             c.nextFocusLeftId = (if (i == 0) c else dockCards[i - 1]).id
             c.nextFocusRightId = (if (i == d - 1) c else dockCards[i + 1]).id
-            c.nextFocusDownId = (if (g > 0) gridCards[minOf(i, g - 1)] else c).id
+            c.nextFocusDownId = (if (g > 0) gridCards[minOf(i, COLUMNS - 1, g - 1)] else c).id
         }
         val lastRow = (g - 1) / COLUMNS
         for ((j, c) in gridCards.withIndex()) {
