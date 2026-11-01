@@ -7,7 +7,8 @@
     tools/canvas shot out.png              screenshot
     tools/canvas install [apk] [--app-only]
                                            install Canvas; without --app-only also make it the
-                                           home screen and screensaver (backs up first)
+                                           home screen and screensaver. It backs up first, then
+                                           disables the TV's own home app(s), whatever they are
     tools/canvas restore [--uninstall]     undo `install` from the backup
     tools/canvas debloat <list> [--yes | --group "<name>"]
                                            disable packages from a device list (reversible). The list groups
@@ -51,7 +52,12 @@ SHOTS = os.path.join(ROOT, "shots")
 PKG = "io.github.shalintripathi.canvas"
 HOME = PKG + "/.home.HomeActivity"
 DREAM = PKG + "/.frame.FrameDreamService"
-STOCK_HOMES = ["com.google.android.apps.tv.launcherx", "com.google.android.tungsten.setupwraith"]
+# Home apps that `install` never disables: Canvas itself, and the system Settings apps, whose FallbackHome is
+# the TV's safety net when no other home app is enabled.
+KEEP_HOMES = [PKG, "com.android.tv.settings", "com.android.settings"]
+# The two home apps older versions of `install` disabled by name. Only `restore` still uses this list, to
+# re-enable them on a TV where an old install recorded nothing.
+LEGACY_STOCK_HOMES = ["com.google.android.apps.tv.launcherx", "com.google.android.tungsten.setupwraith"]
 SECURE_KEYS = ["screensaver_components", "screensaver_enabled", "screensaver_activate_on_sleep", "sleep_timeout"]
 SYSTEM_KEYS = ["screen_off_timeout"]
 ADB_PORT = 5555
@@ -183,7 +189,7 @@ def tv_host():
     if not host and os.path.exists(HOST_FILE):
         host = open(HOST_FILE).read().strip()
     if not host:
-        sys.exit("Don't know your TV's address. Run `tools/canvas find`, or set TV_HOST=192.168.x.y")
+        sys.exit("Don't know your TV's address. Run `tools/canvas find`, or set TV_HOST=<tv-ip>")
     return host
 
 
@@ -338,11 +344,23 @@ def current_home(dev):
     return out.splitlines()[-1].strip() if out else ""
 
 
-def canvas_is_home_candidate(dev):
-    """True if the TV lists Canvas's HomeActivity among the HOME activities (whichever one currently wins)."""
+def home_components(dev):
+    """Every HOME activity the TV lists, as `pkg/.Cls` strings in the order the TV gives them (whichever one
+    currently wins). `--brief` prints a count line and a priority line around each component; those are skipped."""
     out = sh(dev, "cmd package query-activities --brief -a android.intent.action.MAIN "
                   "-c android.intent.category.HOME")
-    return any(same_component(line, HOME) for line in out.splitlines() if "/" in line and " " not in line.strip())
+    return [line.strip() for line in out.splitlines() if "/" in line and " " not in line.strip()]
+
+
+def stock_homes(components):
+    """The packages `install` has to disable before Canvas can be Home: the package of every HOME activity,
+    except KEEP_HOMES. In the order listed, each package once."""
+    packages = []
+    for component in components:
+        pkg = component.partition("/")[0]
+        if pkg not in KEEP_HOMES and pkg not in packages:
+            packages.append(pkg)
+    return packages
 
 
 def installed(dev, pkg):
@@ -387,8 +405,9 @@ def take_backup(dev):
     if PKG in home or PKG in dream:
         sys.exit(f"Refusing to back up: this TV already uses Canvas (home: {home or 'none'}, screensaver: {dream}), "
                  "so these are not its stock settings and `restore` would keep Canvas.\n"
-                 "Put the stock home screen and screensaver back first (for example "
-                 "`tools/canvas sh pm enable com.google.android.apps.tv.launcherx`), then run install again.")
+                 "Put the stock home screen and screensaver back first (list what is switched off with "
+                 "`tools/canvas sh 'pm list packages -d'`, then `tools/canvas sh pm enable <package>`), "
+                 "then run install again.")
     if "/" not in home or "ResolverActivity" in home:
         sys.exit(f"Refusing to back up: the TV reports no usable home screen (home: {home or 'none'}). "
                  "It may be showing a chooser or have no launcher enabled. "
@@ -437,22 +456,25 @@ def cmd_install(args):
             print("Installed (app only).")
             return
 
-        # Google TV's launcher outranks every other HOME activity, so Canvas can only become Home once the stock
-        # launchers are disabled. Check that Canvas is a candidate, disable them, then check Canvas really won.
-        if not canvas_is_home_candidate(dev):
+        # A TV's own launcher usually outranks every other HOME activity (Google TV's always does), so Canvas can
+        # only become Home once those launchers are disabled. Ask the TV which HOME activities it has, check that
+        # Canvas is one of them, disable the others, then check Canvas really won.
+        components = home_components(dev)
+        if not any(same_component(component, HOME) for component in components):
             sys.exit("The TV does not list Canvas as a home screen (no HOME activity for "
                      f"{HOME} in `cmd package query-activities`). Nothing was disabled or changed.")
+        stock = stock_homes(components)
+        print("Switching off the TV's own home apps (undo with `tools/canvas restore`): " + (", ".join(stock) or "none"))
         with open(path) as f:
             backup = json.load(f)
         run(dev, f"cmd package set-home-activity --user 0 {HOME}")
         disabled_now = []
-        for pkg in STOCK_HOMES:
-            if installed(dev, pkg) and enabled(dev, pkg):
-                if pkg not in backup["disabled_by_canvas"]:
-                    backup["disabled_by_canvas"].append(pkg)
-                save_backup(path, backup)  # on disk before the disable, so a failure part-way can still be undone
-                run(dev, f"pm disable-user --user 0 {pkg}")
-                disabled_now.append(pkg)
+        for pkg in stock:
+            if pkg not in backup["disabled_by_canvas"]:
+                backup["disabled_by_canvas"].append(pkg)
+            save_backup(path, backup)  # on disk before the disable, so a failure part-way can still be undone
+            run(dev, f"pm disable-user --user 0 {pkg}")
+            disabled_now.append(pkg)
         run(dev, f"cmd package set-home-activity --user 0 {HOME}")
         home = current_home(dev)
         if not same_component(home, HOME):
@@ -466,7 +488,7 @@ def cmd_install(args):
                 sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}), and "
                          f"{', '.join(stuck)} could not be re-enabled. Run `tools/canvas restore`.")
             sys.exit(f"Canvas did not become the home screen (the TV says: {home or 'nothing'}). "
-                     f"Re-enabled the stock launcher ({', '.join(disabled_now) or 'none had been disabled'}). "
+                     f"Re-enabled the TV's own home app ({', '.join(disabled_now) or 'none had been disabled'}). "
                      "The screensaver and other settings were not changed.")
         run(dev, f"settings put secure screensaver_components {DREAM}")
         run(dev, "settings put secure screensaver_enabled 1")
@@ -506,8 +528,9 @@ def cmd_restore(args):
             sys.exit("No backup for this TV in tools/backups/.")
         with open(path) as f:
             backup = json.load(f)
-        # Also re-enable any installed stock home, in case an install stopped before it recorded the change.
-        packages = list(dict.fromkeys(backup["disabled_by_canvas"] + [p for p in STOCK_HOMES if installed(dev, p)]))
+        # Also re-enable the two home apps older installs disabled by name, in case one stopped before it recorded them.
+        packages = list(dict.fromkeys(backup["disabled_by_canvas"]
+                                      + [p for p in LEGACY_STOCK_HOMES if installed(dev, p)]))
         for pkg in packages:
             run(dev, f"pm enable {pkg}")
         for table, values in (("secure", backup["secure"]), ("system", backup["system"])):
