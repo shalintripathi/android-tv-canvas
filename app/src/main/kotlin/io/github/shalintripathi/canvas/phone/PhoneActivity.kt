@@ -86,11 +86,11 @@ class PhoneActivity : Activity() {
         right.addView(qr, LinearLayout.LayoutParams(dp(260), dp(260)))
         right.addView(label("OR OPEN"), linearParams(WRAP, WRAP, 0, dp(18), 0, dp(2)))
         address = text(18f, "sans-serif-medium", Color.WHITE)
-        right.addView(address)
+        right.addView(address, LinearLayout.LayoutParams(WRAP, WRAP))
         right.addView(label("AND ENTER"), linearParams(WRAP, WRAP, 0, dp(10), 0, dp(2)))
         pin = text(34f, "sans-serif-light", Color.WHITE)
         pin.letterSpacing = 0.12f
-        right.addView(pin)
+        right.addView(pin, LinearLayout.LayoutParams(WRAP, WRAP))
         row.addView(right, LinearLayout.LayoutParams(WRAP, WRAP))
 
         root.addView(row, frameParams(MATCH, WRAP, Gravity.CENTER_VERTICAL, dp(96), 0, dp(96), 0))
