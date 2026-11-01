@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Test, lint and build
+        run: ./gradlew --no-daemon test lintDebug assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: canvas-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            core/build/reports/
+            app/build/reports/
+          if-no-files-found: ignore
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANVAS_KEYSTORE_B64: ${{ secrets.CANVAS_KEYSTORE_B64 }}
+          CANVAS_KEYSTORE_PASSWORD: ${{ secrets.CANVAS_KEYSTORE_PASSWORD }}
+          CANVAS_KEY_ALIAS: ${{ secrets.CANVAS_KEY_ALIAS }}
+          CANVAS_KEY_PASSWORD: ${{ secrets.CANVAS_KEY_PASSWORD }}
+        run: |
+          echo "$CANVAS_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
+          export CANVAS_KEYSTORE="$RUNNER_TEMP/release.p12"
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./gradlew --no-daemon assembleRelease -PversionName="$VERSION" -PversionCode="$GITHUB_RUN_NUMBER"
+          cp app/build/outputs/apk/release/app-release.apk "canvas-$VERSION.apk"
+          gh release create "$GITHUB_REF_NAME" "canvas-$VERSION.apk" --title "Canvas $VERSION" --generate-notes
