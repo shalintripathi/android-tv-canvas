@@ -43,7 +43,14 @@ object PopupList {
         popup.isOutsideTouchable = true
         popup.elevation = context.dp(16).toFloat()
         popup.setOnDismissListener { onDismiss() }
-        popup.showAsDropDown(anchor, 0, context.dp(8), Gravity.START)
+        // Under the anchor when the whole list fits there; otherwise above it (the dock sits at the screen's bottom).
+        val gap = context.dp(8)
+        list.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.UNSPECIFIED)
+        val anchorLocation = IntArray(2)
+        anchor.getLocationOnScreen(anchorLocation)
+        val fitsBelow = anchorLocation[1] + anchor.height + gap + list.measuredHeight <= context.resources.displayMetrics.heightPixels
+        val yOffset = if (fitsBelow) gap else -(anchor.height + gap + list.measuredHeight)
+        popup.showAsDropDown(anchor, 0, yOffset, Gravity.START)
         rows.firstOrNull()?.requestFocus()
         return popup
     }
