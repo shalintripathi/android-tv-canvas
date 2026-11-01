@@ -1,0 +1,18 @@
+# Build output
+.gradle/
+build/
+*/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Private to your machine / your TV
+tools/venv/
+tools/adbkey/
+tools/.tv_host
+tools/backups/
+*.jks
+*.keystore
+__pycache__/
+shots/
